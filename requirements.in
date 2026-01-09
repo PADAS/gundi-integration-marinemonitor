@@ -1,1 +1,6 @@
 # Add your integration-specific dependencies here
+httpx>=0.24.0           # Async HTTP client
+pytest>=7.0.0           # Testing framework
+pytest-asyncio>=0.21.0  # Async test support
+pytest-mock>=3.10.0     # Mocking support
+respx>=0.20.0           # Mock httpx requests

@@ -1,0 +1,317 @@
+"""Tests for Marine Monitor action handlers."""
+import pytest
+from datetime import timezone
+from unittest.mock import AsyncMock, MagicMock, patch
+
+from app.actions.handlers import (
+    transform_track_to_observation,
+    parse_timestamp,
+    action_pull_vessel_tracking,
+    delete_subject_from_earthranger,
+)
+from app.actions.tests.conftest import create_mock_client, patch_handler_dependencies
+
+
+class TestTransformTrackToObservation:
+    """Tests for transform_track_to_observation function."""
+
+    def test_transform_basic_track(self, sample_track, sample_radar_station):
+        """Test transformation of a basic track to observation."""
+        observation = transform_track_to_observation(sample_track, sample_radar_station)
+
+        assert observation["source"] == "538071772"  # radar_track_id
+        assert observation["type"] == "tracking-device"
+        assert observation["subject_type"] == "vessel"
+        assert observation["recorded_at"] == "2026-01-09T12:19:23Z"
+        assert observation["location"]["lat"] == 25.811533
+        assert observation["location"]["lon"] == -111.306303
+
+    def test_transform_includes_track_detection_fields(self, sample_track, sample_radar_station):
+        """Test that track_detection fields are included in additional."""
+        observation = transform_track_to_observation(sample_track, sample_radar_station)
+
+        assert observation["additional"]["speed_kmph"] == 5.5
+        assert observation["additional"]["heading"] == 356.0
+        assert observation["additional"]["bearing"] == 330.025
+        assert observation["additional"]["distance_nm"] == 17.024
+
+    def test_transform_includes_track_metadata(self, sample_track, sample_radar_station):
+        """Test that track metadata is included in additional."""
+        observation = transform_track_to_observation(sample_track, sample_radar_station)
+
+        assert observation["additional"]["confidence"] == 1.0
+        assert observation["additional"]["radar_track_id"] == 538071772
+        assert observation["additional"]["vessel_name"] == "Test Vessel"
+        assert observation["additional"]["track_source"] == "ais"
+        assert observation["additional"]["active"] is True
+
+    def test_transform_includes_radar_station_metadata(self, sample_track, sample_radar_station):
+        """Test that radar station metadata is included."""
+        observation = transform_track_to_observation(sample_track, sample_radar_station)
+
+        assert observation["additional"]["radar_station_name"] == "Loreto 2"
+        assert observation["additional"]["radar_station_id"] == 42
+
+    def test_transform_track_without_radar_track_id(self, sample_radar_station):
+        """Test transformation when radar_track_id is missing."""
+        track = {
+            "id": 12345,
+            "last_update": "2026-01-09T12:00:00Z",
+            "track_detection": {
+                "lat": 25.0,
+                "lon": -111.0,
+            },
+        }
+
+        observation = transform_track_to_observation(track, sample_radar_station)
+
+        assert observation["source"] == "track-12345"
+
+    def test_transform_track_uses_last_update_as_fallback(self, sample_radar_station):
+        """Test that last_update is used when track_detection.timestamp is missing."""
+        track = {
+            "id": 12345,
+            "radar_track_id": 999,
+            "last_update": "2026-01-09T12:00:00Z",
+            "track_detection": {
+                "lat": 25.0,
+                "lon": -111.0,
+                # No timestamp in track_detection
+            },
+        }
+
+        observation = transform_track_to_observation(track, sample_radar_station)
+
+        assert observation["recorded_at"] == "2026-01-09T12:00:00Z"
+
+    def test_transform_track_with_missing_optional_fields(self, sample_radar_station):
+        """Test transformation when optional fields are missing."""
+        track = {
+            "id": 12345,
+            "radar_track_id": 999,
+            "last_update": "2026-01-09T12:00:00Z",
+            "track_detection": {
+                "lat": 25.0,
+                "lon": -111.0,
+            },
+        }
+
+        observation = transform_track_to_observation(track, sample_radar_station)
+
+        # Should not have speed, heading, etc. in additional
+        assert "speed_kmph" not in observation["additional"]
+        assert "heading" not in observation["additional"]
+        assert "bearing" not in observation["additional"]
+        assert "distance_nm" not in observation["additional"]
+        assert "confidence" not in observation["additional"]
+        assert "vessel_name" not in observation["additional"]
+
+
+class TestParseTimestamp:
+    """Tests for parse_timestamp function."""
+
+    def test_parse_timestamp_with_z_suffix(self):
+        """Test parsing timestamp with Z suffix."""
+        result = parse_timestamp("2026-01-09T12:19:23Z")
+
+        assert result.year == 2026
+        assert result.month == 1
+        assert result.day == 9
+        assert result.hour == 12
+        assert result.minute == 19
+        assert result.second == 23
+        assert result.tzinfo == timezone.utc
+
+    def test_parse_timestamp_with_offset(self):
+        """Test parsing timestamp with timezone offset."""
+        result = parse_timestamp("2026-01-09T12:19:23+00:00")
+
+        assert result.tzinfo == timezone.utc
+
+    def test_parse_timestamp_without_timezone(self):
+        """Test parsing timestamp without timezone assumes UTC."""
+        result = parse_timestamp("2026-01-09T12:19:23")
+
+        assert result.tzinfo == timezone.utc
+
+    def test_parse_timestamp_converts_to_utc(self):
+        """Test that non-UTC timestamps are converted to UTC."""
+        # -07:00 offset (7 hours behind UTC)
+        result = parse_timestamp("2026-01-09T05:19:23-07:00")
+
+        # Should be converted to 12:19:23 UTC
+        assert result.hour == 12
+        assert result.tzinfo == timezone.utc
+
+
+class TestDeleteSubjectFromEarthRanger:
+    """Tests for delete_subject_from_earthranger placeholder function."""
+
+    @pytest.mark.asyncio
+    async def test_delete_subject_placeholder(self):
+        """Test that placeholder function returns True."""
+        result = await delete_subject_from_earthranger(
+            subject_id="538071772",
+            integration_id="test-integration-id",
+        )
+
+        assert result is True
+
+
+class TestActionPullVesselTracking:
+    """Tests for action_pull_vessel_tracking handler."""
+
+    @pytest.mark.asyncio
+    async def test_pull_vessel_tracking_success(
+        self,
+        mock_integration,
+        mock_pull_config,
+        mock_marine_monitor_client,
+        mock_state_manager,
+    ):
+        """Test successful pull of vessel tracking data."""
+        with patch_handler_dependencies(
+            mock_marine_monitor_client, mock_state_manager
+        ) as mocks:
+            result = await action_pull_vessel_tracking(
+                integration=mock_integration,
+                action_config=mock_pull_config,
+            )
+
+            assert result["observations_extracted"] == 1
+            assert result["radar_stations_processed"] == 2
+            assert result["tracks_processed"] == 1
+            assert result["radar_stations_failed"] == 0
+
+            # Verify observations were sent to Gundi
+            mocks["send_observations"].assert_called_once()
+            observations = mocks["send_observations"].call_args.kwargs["observations"]
+            assert len(observations) == 1
+            assert observations[0]["source"] == "538071772"
+
+    @pytest.mark.asyncio
+    async def test_pull_vessel_tracking_no_tracks(
+        self,
+        mock_integration,
+        mock_pull_config,
+        mock_state_manager,
+    ):
+        """Test pull when no tracks are available."""
+        mock_client = create_mock_client([{"id": 1, "name": "Station 1", "tracks": []}])
+
+        with patch_handler_dependencies(mock_client, mock_state_manager) as mocks:
+            result = await action_pull_vessel_tracking(
+                integration=mock_integration,
+                action_config=mock_pull_config,
+            )
+
+            assert result["observations_extracted"] == 0
+            assert result["tracks_processed"] == 0
+            mocks["send_observations"].assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_pull_vessel_tracking_api_error(
+        self,
+        mock_integration,
+        mock_pull_config,
+        mock_state_manager,
+    ):
+        """Test that API errors are propagated."""
+        from app.actions.marine_monitor import MarineMonitorServiceUnreachable
+
+        mock_client = create_mock_client([])
+        mock_client.get_track_markers = AsyncMock(
+            side_effect=MarineMonitorServiceUnreachable("Service unavailable")
+        )
+
+        with patch_handler_dependencies(mock_client, mock_state_manager):
+            with pytest.raises(MarineMonitorServiceUnreachable):
+                await action_pull_vessel_tracking(
+                    integration=mock_integration,
+                    action_config=mock_pull_config,
+                )
+
+    @pytest.mark.asyncio
+    async def test_pull_vessel_tracking_graceful_degradation(
+        self,
+        mock_integration,
+        mock_pull_config,
+        mock_state_manager,
+    ):
+        """Test that errors for individual radar stations don't stop processing."""
+        response = [
+            {
+                "id": 1,
+                "name": "Good Station",
+                "tracks": [
+                    {
+                        "id": 1,
+                        "radar_track_id": 111,
+                        "track_detection": {
+                            "timestamp": "2026-01-09T12:00:00Z",
+                            "lat": 25.0,
+                            "lon": -111.0,
+                        },
+                    }
+                ],
+            },
+            {
+                # Station without ID should be skipped
+                "name": "Bad Station",
+                "tracks": [],
+            },
+        ]
+
+        mock_client = create_mock_client(response)
+
+        with patch_handler_dependencies(mock_client, mock_state_manager):
+            result = await action_pull_vessel_tracking(
+                integration=mock_integration,
+                action_config=mock_pull_config,
+            )
+
+            assert result["observations_extracted"] == 1
+            assert result["radar_stations_processed"] == 1
+
+    @pytest.mark.asyncio
+    async def test_pull_vessel_tracking_updates_state(
+        self,
+        mock_integration,
+        mock_pull_config,
+        mock_marine_monitor_client,
+        mock_state_manager,
+    ):
+        """Test that state is updated after successful pull."""
+        with patch_handler_dependencies(mock_marine_monitor_client, mock_state_manager):
+            await action_pull_vessel_tracking(
+                integration=mock_integration,
+                action_config=mock_pull_config,
+            )
+
+            mock_state_manager.set_state.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_pull_vessel_tracking_deletion_disabled(
+        self,
+        mock_integration,
+        mock_marine_monitor_client,
+        mock_state_manager,
+    ):
+        """Test that deletion is skipped when delete_subject_after_minutes is 0."""
+        mock_config = MagicMock()
+        mock_config.api_url = "https://test.example.com/api"
+        mock_config.api_key.get_secret_value.return_value = "test-key"
+        mock_config.delete_subject_after_minutes = 0
+
+        with patch_handler_dependencies(
+            mock_marine_monitor_client, mock_state_manager
+        ), patch(
+            "app.actions.handlers.delete_subject_from_earthranger",
+            new_callable=AsyncMock,
+        ) as mock_delete:
+            await action_pull_vessel_tracking(
+                integration=mock_integration,
+                action_config=mock_config,
+            )
+
+            mock_delete.assert_not_called()

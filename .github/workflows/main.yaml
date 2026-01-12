@@ -4,6 +4,7 @@ on:
     branches:
       - main
       - 'release-**'
+      - 'vibe-coded-marine-monitor-connector'
 
 jobs:
   vars:
@@ -52,7 +53,7 @@ jobs:
 
   deploy_stage:
     uses: PADAS/gundi-workflows/.github/workflows/update_hcl.yml@v2
-    if: startsWith(github.ref, 'refs/heads/release')
+    if: startsWith(github.ref, 'refs/heads/vibe-coded-marine-monitor-connector')
     needs: [vars, build]
     with:
       git_repository: PADAS/gundi-integrations-v2-infra

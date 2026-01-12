@@ -242,3 +242,23 @@ async def test_client_authorization_header():
 
             # Verify the Authorization header was sent
             assert route.calls[0].request.headers["Authorization"] == api_key
+
+
+@pytest.mark.asyncio
+async def test_client_url_with_trackmarkers_path():
+    """Test that URL with /trackmarkers path is stripped and handled correctly."""
+    # URL already includes /trackmarkers which should be removed
+    api_url = "https://m2mobile.protectedseas.net/api/map/42/earthranger/trackmarkers"
+
+    async with respx.mock(assert_all_called=True) as mock:
+        # The client should strip /trackmarkers and then add it back when calling the endpoint
+        mock.get("https://m2mobile.protectedseas.net/api/map/42/earthranger/trackmarkers").respond(
+            status_code=httpx.codes.OK,
+            json=[],
+        )
+
+        async with MarineMonitorClient(api_url=api_url, api_key="test-key") as client:
+            result = await client.get_track_markers()
+            assert result == []
+            # Verify the correct URL was called (without double /trackmarkers)
+            assert client.api_url == "https://m2mobile.protectedseas.net/api/map/42/earthranger"

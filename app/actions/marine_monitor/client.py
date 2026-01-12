@@ -44,7 +44,11 @@ class MarineMonitorClient:
         :param connect_timeout: Connection timeout in seconds
         :param data_timeout: Data read timeout in seconds
         """
-        self.api_url = api_url.rstrip("/")
+        # Remove trailing slash and /trackmarkers path if present
+        api_url = api_url.rstrip("/")
+        if api_url.endswith("/trackmarkers"):
+            api_url = api_url[:-len("/trackmarkers")]
+        self.api_url = api_url
         self.api_key = api_key
         session_kwargs = {
             "timeout": httpx.Timeout(data_timeout, connect=connect_timeout),

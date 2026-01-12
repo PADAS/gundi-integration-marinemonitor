@@ -401,6 +401,7 @@ class TestActionPullVesselTracking:
         mock_config = MagicMock()
         mock_config.api_url = "https://test.example.com/api"
         mock_config.api_key.get_secret_value.return_value = "test-key"
+        mock_config.minimal_confidence = 0.1
         mock_config.deactivate_subjects_auto = False
 
         with patch_handler_dependencies(

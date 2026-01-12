@@ -23,20 +23,31 @@ attrs==25.3.0
     # via aiohttp
 backoff==2.2.1
     # via gcloud-aio-auth
+backports-zoneinfo==0.2.1 ; python_version < "3.9"
+    # via
+    #   -r requirements.in
+    #   tzlocal
 certifi==2026.1.4
     # via
     #   httpcore
     #   httpx
+    #   requests
 cffi==1.17.1
     # via cryptography
 chardet==5.2.0
     # via gcloud-aio-auth
+charset-normalizer==3.4.4
+    # via requests
 click==8.1.8
     # via
     #   -r requirements-base.in
     #   uvicorn
 cryptography==44.0.3
     # via gcloud-aio-auth
+dateparser==1.2.2
+    # via earthranger-client
+earthranger-client @ https://github.com/PADAS/er-client/releases/download/v1.8.2-alpha/earthranger_client-1.8.2-py3-none-any.whl
+    # via -r requirements.in
 environs==9.5.0
     # via
     #   -r requirements-base.in
@@ -55,6 +66,8 @@ gcloud-aio-auth==5.3.2
     # via gcloud-aio-pubsub
 gcloud-aio-pubsub==6.0.1
     # via -r requirements-base.in
+gpxpy==1.6.2
+    # via earthranger-client
 gundi-client-v2==2.4.1
     # via -r requirements-base.in
 gundi-core==1.11.2
@@ -70,12 +83,14 @@ httpcore==1.0.9
 httpx==0.28.1
     # via
     #   -r requirements.in
+    #   earthranger-client
     #   gundi-client-v2
     #   respx
 idna==3.11
     # via
     #   anyio
     #   httpx
+    #   requests
     #   yarl
 iniconfig==2.1.0
     # via pytest
@@ -102,6 +117,7 @@ pycparser==2.23
 pydantic==1.10.26
     # via
     #   -r requirements-base.in
+    #   earthranger-client
     #   fastapi
     #   gundi-client-v2
     #   gundi-core
@@ -118,16 +134,28 @@ pytest-asyncio==0.24.0
     # via -r requirements.in
 pytest-mock==3.14.1
     # via -r requirements.in
+python-dateutil==2.9.0.post0
+    # via dateparser
 python-dotenv==1.0.1
     # via environs
 python-json-logger==2.0.7
     # via -r requirements-base.in
+pytz==2025.2
+    # via
+    #   dateparser
+    #   earthranger-client
 redis==5.0.8
     # via -r requirements-base.in
+regex==2024.11.6
+    # via dateparser
+requests==2.32.4
+    # via earthranger-client
 respx==0.22.0
     # via
     #   -r requirements.in
     #   gundi-client-v2
+six==1.17.0
+    # via python-dateutil
 sniffio==1.3.1
     # via anyio
 stamina==23.2.0
@@ -147,6 +175,10 @@ typing-extensions==4.13.2
     #   stamina
     #   starlette
     #   uvicorn
+tzlocal==5.2
+    # via dateparser
+urllib3==2.2.3
+    # via requests
 uvicorn==0.23.2
     # via -r requirements-base.in
 yarl==1.15.2

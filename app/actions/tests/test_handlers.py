@@ -19,7 +19,7 @@ class TestTransformTrackToObservation:
         """Test transformation of a basic track to observation."""
         observation = transform_track_to_observation(sample_track, sample_radar_station)
 
-        assert observation["source"] == "538071772"  # radar_track_id
+        assert observation["source"] == "48590736"  # track id
         assert observation["type"] == "tracking-device"
         assert observation["subject_type"] == "vessel"
         assert observation["recorded_at"] == "2026-01-09T12:19:23Z"
@@ -52,10 +52,9 @@ class TestTransformTrackToObservation:
         assert observation["additional"]["radar_station_name"] == "Loreto 2"
         assert observation["additional"]["radar_station_id"] == 42
 
-    def test_transform_track_without_radar_track_id(self, sample_radar_station):
-        """Test transformation when radar_track_id is missing."""
+    def test_transform_track_without_id(self, sample_radar_station):
+        """Test transformation when id is missing (fallback to default)."""
         track = {
-            "id": 12345,
             "last_update": "2026-01-09T12:00:00Z",
             "track_detection": {
                 "lat": 25.0,
@@ -65,7 +64,7 @@ class TestTransformTrackToObservation:
 
         observation = transform_track_to_observation(track, sample_radar_station)
 
-        assert observation["source"] == "track-12345"
+        assert observation["source"] == "default-source"
 
     def test_transform_track_uses_last_update_as_fallback(self, sample_radar_station):
         """Test that last_update is used when track_detection.timestamp is missing."""
@@ -238,7 +237,7 @@ class TestActionPullVesselTracking:
             mocks["send_observations"].assert_called_once()
             observations = mocks["send_observations"].call_args.kwargs["observations"]
             assert len(observations) == 1
-            assert observations[0]["source"] == "538071772"
+            assert observations[0]["source"] == "48590736"  # track id
 
     @pytest.mark.asyncio
     async def test_pull_vessel_tracking_no_tracks(

@@ -145,7 +145,7 @@ def transform_track_to_observation(
     return {
         "source": source_id,
         "type": "tracking-device",
-        "subject_type": "vessel",
+        "subject_type": "vehicle",
         "recorded_at": timestamp,
         "location": {
             "lat": float(track_detection.get("lat", 0.0)),

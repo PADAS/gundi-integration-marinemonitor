@@ -22,7 +22,7 @@ class TestTransformTrackToObservation:
 
         assert observation["source"] == "48590736"  # track id
         assert observation["type"] == "tracking-device"
-        assert observation["subject_type"] == "vessel"
+        assert observation["subject_type"] == "vehicle"
         assert observation["recorded_at"] == "2026-01-09T12:19:23Z"
         assert observation["location"]["lat"] == 25.811533
         assert observation["location"]["lon"] == -111.306303

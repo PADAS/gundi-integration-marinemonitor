@@ -114,10 +114,10 @@ def transform_track_to_observation(
     :return: Observation in Gundi schema format
     """
     track_detection = track.get("track_detection", {})
-    track_id = track.get("id")
+    track_id = track.get("id", track.get("radar_track_id", "unknown-source"))
 
     # Use track ID as source identifier, fallback to default if not set
-    source_id = str(track_id) if track_id else "default-source"
+    source_id = f"marinemonitor-{track_id}"
 
     # Prefer track_detection timestamp, fallback to last_update
     timestamp = track_detection.get("timestamp") or track.get("last_update")

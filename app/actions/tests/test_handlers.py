@@ -20,7 +20,7 @@ class TestTransformTrackToObservation:
         """Test transformation of a basic track to observation."""
         observation = transform_track_to_observation(sample_track, sample_radar_station)
 
-        assert observation["source"] == "48590736"  # track id
+        assert observation["source"] == "marinemonitor-48590736"  # track id with prefix
         assert observation["type"] == "tracking-device"
         assert observation["subject_type"] == "vehicle"
         assert observation["recorded_at"] == "2026-01-09T12:19:23Z"
@@ -65,7 +65,7 @@ class TestTransformTrackToObservation:
 
         observation = transform_track_to_observation(track, sample_radar_station)
 
-        assert observation["source"] == "default-source"
+        assert observation["source"] == "marinemonitor-unknown-source"
 
     def test_transform_track_uses_last_update_as_fallback(self, sample_radar_station):
         """Test that last_update is used when track_detection.timestamp is missing."""
@@ -137,7 +137,7 @@ class TestTransformTrackToObservation:
         # With minimal_confidence=0.5, track should pass
         observation = _process_track(track, sample_radar_station, minimal_confidence=0.5)
         assert observation is not None
-        assert observation["source"] == "12345"
+        assert observation["source"] == "marinemonitor-12345"
 
     def test_process_track_no_confidence_field(self, sample_radar_station):
         """Test that tracks without confidence field are not filtered."""
@@ -153,7 +153,7 @@ class TestTransformTrackToObservation:
         # Without confidence field, track should pass regardless of threshold
         observation = _process_track(track, sample_radar_station, minimal_confidence=0.5)
         assert observation is not None
-        assert observation["source"] == "12345"
+        assert observation["source"] == "marinemonitor-12345"
 
 
 class TestParseTimestamp:
@@ -287,7 +287,7 @@ class TestActionPullVesselTracking:
             mocks["send_observations"].assert_called_once()
             observations = mocks["send_observations"].call_args.kwargs["observations"]
             assert len(observations) == 1
-            assert observations[0]["source"] == "48590736"  # track id
+            assert observations[0]["source"] == "marinemonitor-48590736"  # track id with prefix
 
     @pytest.mark.asyncio
     async def test_pull_vessel_tracking_no_tracks(
@@ -482,6 +482,6 @@ class TestActionPullVesselTracking:
             assert len(observations) == 2
             # Verify the filtered track (id=2) is not included
             observation_sources = {obs["source"] for obs in observations}
-            assert "1" in observation_sources
-            assert "3" in observation_sources
-            assert "2" not in observation_sources
+            assert "marinemonitor-1" in observation_sources
+            assert "marinemonitor-3" in observation_sources
+            assert "marinemonitor-2" not in observation_sources

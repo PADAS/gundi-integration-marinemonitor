@@ -1,6 +1,8 @@
 # Add your integration-specific dependencies here
+backports.zoneinfo; python_version < "3.9"
 httpx>=0.24.0           # Async HTTP client
 pytest>=7.0.0           # Testing framework
 pytest-asyncio>=0.21.0  # Async test support
 pytest-mock>=3.10.0     # Mocking support
 respx>=0.20.0           # Mock httpx requests
+https://github.com/PADAS/er-client/releases/download/v1.8.2-alpha/earthranger_client-1.8.2-py3-none-any.whl

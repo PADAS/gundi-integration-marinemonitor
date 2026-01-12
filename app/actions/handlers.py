@@ -1,7 +1,10 @@
 """Action handlers for Marine Monitor integration."""
 import logging
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from typing import Any
+
+from erclient import AsyncERClient
+from erclient.er_errors import ERClientNotFound
 
 from app.actions.configurations import PullVesselTrackingConfiguration
 from app.actions.marine_monitor import MarineMonitorClient
@@ -13,26 +16,80 @@ from app.services.state import IntegrationStateManager
 logger = logging.getLogger(__name__)
 
 
-async def delete_subject_from_earthranger(
-    subject_id: str,
-    integration_id: str,
+async def deactivate_subject_in_earthranger(
+    track_id: str,
+    er_base_url: str,
+    er_token: str,
 ) -> bool:
-    """Placeholder function to delete a subject from EarthRanger.
+    """Deactivate a subject in EarthRanger by setting is_active to false.
 
-    TODO: Implement the actual EarthRanger API call to delete a subject.
+    This function:
+    1. Gets the source by manufacturer_id (track_id)
+    2. Gets all subjects linked to the source
+    3. Picks the subject with the most recent last_position_date
+    4. Deactivates that subject
 
-    :param subject_id: The source ID of the subject to delete
-    :param integration_id: The integration ID for authentication
-    :return: True if deletion was successful
+    :param track_id: The track ID used as manufacturer_id in ER
+    :param er_base_url: The EarthRanger base URL
+    :param er_token: The EarthRanger auth token
+    :return: True if deactivation was successful, False otherwise
     """
-    logger.info(
-        f"[PLACEHOLDER] Would delete subject '{subject_id}' from EarthRanger "
-        f"for integration {integration_id}"
-    )
-    # TODO: Implement EarthRanger API call:
-    # DELETE /api/v1.0/subjects/{subject_id}
-    # or use appropriate EarthRanger client
-    return True
+    try:
+        async with AsyncERClient(
+            service_root=f"{er_base_url}/api/v1.0",
+            token=er_token,
+        ) as client:
+            # Step 1: Get source by manufacturer_id (track_id)
+            try:
+                source_response = await client.get_source_by_manufacturer_id(track_id)
+                source = source_response.get("data", source_response)
+            except ERClientNotFound:
+                logger.warning(
+                    f"Source not found for track_id '{track_id}', skipping deactivation"
+                )
+                return False
+
+            source_id = source.get("id")
+            if not source_id:
+                logger.warning(f"Source response missing 'id' for track_id '{track_id}'")
+                return False
+
+            # Step 2: Get subjects linked to the source
+            subjects = await client.get_source_subjects(source_id)
+            if not subjects:
+                logger.info(f"No subjects found for source '{source_id}', nothing to deactivate")
+                return False
+
+            # Step 3: Pick subject with most recent last_position_date
+            def get_position_date(subject):
+                date_str = subject.get("last_position_date")
+                if not date_str:
+                    return datetime.min.replace(tzinfo=timezone.utc)
+                try:
+                    return parse_timestamp(date_str)
+                except (ValueError, TypeError):
+                    return datetime.min.replace(tzinfo=timezone.utc)
+
+            subject_to_deactivate = max(subjects, key=get_position_date)
+            subject_id = subject_to_deactivate.get("id")
+
+            if not subject_id:
+                logger.warning("Subject missing 'id' field")
+                return False
+
+            # Check if already inactive
+            if not subject_to_deactivate.get("is_active", True):
+                logger.info(f"Subject '{subject_id}' is already inactive")
+                return True
+
+            # Step 4: Deactivate the subject
+            await client.patch_subject(subject_id, {"is_active": False})
+            logger.info(f"Successfully deactivated subject '{subject_id}' for track '{track_id}'")
+            return True
+
+    except Exception as e:
+        logger.exception(f"Failed to deactivate subject for track_id '{track_id}': {e}")
+        return False
 
 
 def _add_optional_field(
@@ -57,10 +114,10 @@ def transform_track_to_observation(
     :return: Observation in Gundi schema format
     """
     track_detection = track.get("track_detection", {})
-    radar_track_id = track.get("radar_track_id")
+    track_id = track.get("id")
 
-    # Use radar_track_id as source identifier, fallback to track id
-    source_id = str(radar_track_id) if radar_track_id else f"track-{track.get('id')}"
+    # Use raw track ID as source identifier
+    source_id = str(track_id)
 
     # Prefer track_detection timestamp, fallback to last_update
     timestamp = track_detection.get("timestamp") or track.get("last_update")
@@ -75,7 +132,7 @@ def transform_track_to_observation(
 
     # Track metadata
     _add_optional_field(additional, "confidence", track.get("confidence"), float)
-    _add_optional_field(additional, "radar_track_id", radar_track_id)
+    _add_optional_field(additional, "radar_track_id", track.get("radar_track_id"))
     _add_optional_field(additional, "vessel_name", track.get("vessel_name"))
     _add_optional_field(additional, "track_source", track.get("source"))
     _add_optional_field(additional, "track_started", track.get("started"))
@@ -145,55 +202,70 @@ def _process_track(
 async def _handle_stale_subjects(
     state_manager: IntegrationStateManager,
     integration_id: str,
+    er_base_url: str,
+    er_token: str,
     active_track_ids: set[str],
-    delete_after_minutes: int,
     now: datetime,
 ) -> int:
-    """Handle deletion of stale subjects and update state.
+    """Handle deactivation of stale subjects and update state.
 
-    Returns the number of subjects deleted.
+    Compares currently active tracks with stored state. Deactivates subjects
+    for tracks that are no longer appearing in the API.
+
+    Returns the number of subjects deactivated.
     """
-    state = await state_manager.get_state(
+    deactivated_count = 0
+
+    # Get track index to find known track IDs
+    # ToDo: Use state manager Groups (redis set) as in the ATS integration, once available in the template repo
+    index_state = await state_manager.get_state(
         integration_id=integration_id,
         action_id="pull_vessel_tracking",
-        source_id="tracked_subjects",
+        source_id="track_index",
     )
-    known_subjects = state.get("subjects", {})
+    known_track_ids = set(index_state.get("track_ids", []))
 
-    # Start with currently active tracks
-    updated_subjects = {track_id: now.isoformat() for track_id in active_track_ids}
+    # Find stale tracks (known but not currently active)
+    stale_track_ids = known_track_ids - active_track_ids
 
-    # Process previously known subjects that are no longer active
-    cutoff_time = now - timedelta(minutes=delete_after_minutes)
-    deleted_count = 0
+    # Deactivate subjects for stale tracks
+    for track_id in stale_track_ids:
+        logger.info(f"Track '{track_id}' is stale, attempting to deactivate subject")
 
-    for subject_id, last_seen_str in known_subjects.items():
-        if subject_id in active_track_ids:
-            continue
+        deactivated = await deactivate_subject_in_earthranger(
+            track_id=track_id,
+            er_base_url=er_base_url,
+            er_token=er_token,
+        )
 
-        try:
-            last_seen = parse_timestamp(last_seen_str)
-            if last_seen < cutoff_time:
-                deleted = await delete_subject_from_earthranger(
-                    subject_id=subject_id,
-                    integration_id=integration_id,
-                )
-                if deleted:
-                    deleted_count += 1
-                    logger.info(f"Deleted stale subject: {subject_id}")
-            else:
-                updated_subjects[subject_id] = last_seen_str
-        except (ValueError, TypeError):
-            updated_subjects[subject_id] = last_seen_str
+        if deactivated:
+            deactivated_count += 1
+            # Delete the track's state key
+            await state_manager.delete_state(
+                integration_id=integration_id,
+                action_id="pull_vessel_tracking",
+                source_id=track_id,
+            )
+            logger.info(f"Deactivated and removed track '{track_id}' from state")
 
+    # Update track index with currently active tracks
     await state_manager.set_state(
         integration_id=integration_id,
         action_id="pull_vessel_tracking",
-        state={"subjects": updated_subjects, "last_run": now.isoformat()},
-        source_id="tracked_subjects",
+        state={"track_ids": list(active_track_ids), "last_run": now.isoformat()},
+        source_id="track_index",
     )
 
-    return deleted_count
+    # Store individual state for each active track
+    for track_id in active_track_ids:
+        await state_manager.set_state(
+            integration_id=integration_id,
+            action_id="pull_vessel_tracking",
+            state={"last_seen": now.isoformat()},
+            source_id=track_id,
+        )
+
+    return deactivated_count
 
 
 @crontab_schedule("*/5 * * * *")  # Run every 5 minutes
@@ -206,7 +278,7 @@ async def action_pull_vessel_tracking(
 
     Fetches radar station data with vessel tracks and transforms them to
     Gundi observations. Uses state management to track which observations
-    have been processed. Optionally deletes stale subjects from EarthRanger.
+    have been processed. Optionally deactivates stale subjects in EarthRanger.
     """
     state_manager = IntegrationStateManager()
     integration_id = str(integration.id)
@@ -215,7 +287,7 @@ async def action_pull_vessel_tracking(
         "observations_extracted": 0,
         "radar_stations_processed": 0,
         "tracks_processed": 0,
-        "subjects_deleted": 0,
+        "subjects_deactivated": 0,
         "radar_stations_failed": 0,
     }
 
@@ -269,12 +341,13 @@ async def action_pull_vessel_tracking(
                 results["observations_extracted"] = len(all_observations)
                 logger.info(f"Sent {len(all_observations)} observations to Gundi")
 
-            if action_config.delete_subject_after_minutes > 0:
-                results["subjects_deleted"] = await _handle_stale_subjects(
+            if action_config.deactivate_subjects_auto:
+                results["subjects_deactivated"] = await _handle_stale_subjects(
                     state_manager=state_manager,
                     integration_id=integration_id,
+                    er_base_url=action_config.earthranger_base_url,
+                    er_token=action_config.earthranger_token.get_secret_value(),
                     active_track_ids=active_track_ids,
-                    delete_after_minutes=action_config.delete_subject_after_minutes,
                     now=now,
                 )
 
@@ -285,7 +358,7 @@ async def action_pull_vessel_tracking(
     await log_action_activity(
         integration_id=integration_id,
         action_id="pull_vessel_tracking",
-        title=f"Completed: {results['observations_extracted']} observations, {results['subjects_deleted']} subjects deleted",
+        title=f"Completed: {results['observations_extracted']} observations, {results['subjects_deactivated']} subjects deactivated",
         level="INFO",
         data=results,
     )

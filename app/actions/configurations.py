@@ -22,13 +22,27 @@ class PullVesselTrackingConfiguration(PullActionConfiguration):
         description="API key for authentication (sent in Authorization header).",
     )
 
-    delete_subject_after_minutes: int = Field(
-        default=60,
-        ge=0,
-        le=10080,  # Max 7 days
-        title="Delete Subject After (Minutes)",
+    deactivate_subjects_auto: bool = Field(
+        default=True,
+        title="Auto-deactivate Subjects",
         description=(
-            "Delete vessel subjects from EarthRanger if they haven't been updated "
-            "for this many minutes. Set to 0 to disable automatic deletion."
+            "Automatically deactivate vessel subjects in EarthRanger when they "
+            "stop appearing in Marine Monitor API"
         ),
+    )
+
+    earthranger_base_url: str = Field(
+        ...,
+        title="EarthRanger Base URL",
+        description=(
+            "Base URL for EarthRanger API "
+            "(e.g., https://gundi-dev.staging.pamdas.org)"
+        ),
+        min_length=1,
+    )
+
+    earthranger_token: SecretStr = Field(
+        ...,
+        title="EarthRanger Token",
+        description="Authentication token for EarthRanger API",
     )

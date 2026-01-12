@@ -19,7 +19,9 @@ def mock_pull_config():
     config = MagicMock()
     config.api_url = "https://m2mobile.protectedseas.net/api/map/42/earthranger"
     config.api_key.get_secret_value.return_value = "test-api-key"
-    config.delete_subject_after_minutes = 60
+    config.deactivate_subjects_auto = True
+    config.earthranger_base_url = "https://gundi-dev.staging.pamdas.org"
+    config.earthranger_token.get_secret_value.return_value = "test-er-token"
     return config
 
 

@@ -7,7 +7,7 @@ from app.actions.handlers import (
     transform_track_to_observation,
     parse_timestamp,
     action_pull_vessel_tracking,
-    delete_subject_from_earthranger,
+    deactivate_subject_in_earthranger,
 )
 from app.actions.tests.conftest import create_mock_client, patch_handler_dependencies
 
@@ -144,18 +144,69 @@ class TestParseTimestamp:
         assert result.tzinfo == timezone.utc
 
 
-class TestDeleteSubjectFromEarthRanger:
-    """Tests for delete_subject_from_earthranger placeholder function."""
+class TestDeactivateSubjectInEarthRanger:
+    """Tests for deactivate_subject_in_earthranger function."""
 
     @pytest.mark.asyncio
-    async def test_delete_subject_placeholder(self):
-        """Test that placeholder function returns True."""
-        result = await delete_subject_from_earthranger(
-            subject_id="538071772",
-            integration_id="test-integration-id",
+    async def test_deactivate_subject_success(self):
+        """Test successful subject deactivation."""
+        mock_client = MagicMock()
+        mock_client.get_source_by_manufacturer_id = AsyncMock(
+            return_value={"data": {"id": "source-uuid-123", "manufacturer_id": "48590736"}}
         )
+        mock_client.get_source_subjects = AsyncMock(
+            return_value=[
+                {
+                    "id": "subject-uuid",
+                    "is_active": True,
+                    "last_position_date": "2026-01-09T12:00:00Z",
+                }
+            ]
+        )
+        mock_client.patch_subject = AsyncMock(return_value={"is_active": False})
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+
+        with patch("app.actions.handlers.AsyncERClient", return_value=mock_client):
+            result = await deactivate_subject_in_earthranger(
+                track_id="48590736",
+                er_base_url="https://test.pamdas.org",
+                er_token="test-token",
+            )
 
         assert result is True
+        mock_client.patch_subject.assert_called_once_with("subject-uuid", {"is_active": False})
+
+    @pytest.mark.asyncio
+    async def test_deactivate_subject_already_inactive(self):
+        """Test when subject is already inactive."""
+        mock_client = MagicMock()
+        mock_client.get_source_by_manufacturer_id = AsyncMock(
+            return_value={"data": {"id": "source-uuid-123"}}
+        )
+        mock_client.get_source_subjects = AsyncMock(
+            return_value=[
+                {
+                    "id": "subject-uuid",
+                    "is_active": False,  # Already inactive
+                    "last_position_date": "2026-01-09T12:00:00Z",
+                }
+            ]
+        )
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+
+        with patch("app.actions.handlers.AsyncERClient", return_value=mock_client):
+            result = await deactivate_subject_in_earthranger(
+                track_id="48590736",
+                er_base_url="https://test.pamdas.org",
+                er_token="test-token",
+            )
+
+        assert result is True
+        # Should not call patch_subject since already inactive
+        mock_client.patch_subject = AsyncMock()
+        assert not mock_client.patch_subject.called
 
 
 class TestActionPullVesselTracking:
@@ -291,27 +342,27 @@ class TestActionPullVesselTracking:
             mock_state_manager.set_state.assert_called()
 
     @pytest.mark.asyncio
-    async def test_pull_vessel_tracking_deletion_disabled(
+    async def test_pull_vessel_tracking_deactivation_disabled(
         self,
         mock_integration,
         mock_marine_monitor_client,
         mock_state_manager,
     ):
-        """Test that deletion is skipped when delete_subject_after_minutes is 0."""
+        """Test that deactivation is skipped when deactivate_subjects_auto is False."""
         mock_config = MagicMock()
         mock_config.api_url = "https://test.example.com/api"
         mock_config.api_key.get_secret_value.return_value = "test-key"
-        mock_config.delete_subject_after_minutes = 0
+        mock_config.deactivate_subjects_auto = False
 
         with patch_handler_dependencies(
             mock_marine_monitor_client, mock_state_manager
         ), patch(
-            "app.actions.handlers.delete_subject_from_earthranger",
+            "app.actions.handlers.deactivate_subject_in_earthranger",
             new_callable=AsyncMock,
-        ) as mock_delete:
+        ) as mock_deactivate:
             await action_pull_vessel_tracking(
                 integration=mock_integration,
                 action_config=mock_config,
             )
 
-            mock_delete.assert_not_called()
+            mock_deactivate.assert_not_called()

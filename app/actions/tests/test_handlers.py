@@ -8,6 +8,7 @@ from app.actions.handlers import (
     parse_timestamp,
     action_pull_vessel_tracking,
     deactivate_subject_in_earthranger,
+    _process_track,
 )
 from app.actions.tests.conftest import create_mock_client, patch_handler_dependencies
 
@@ -104,6 +105,55 @@ class TestTransformTrackToObservation:
         assert "distance_nm" not in observation["additional"]
         assert "confidence" not in observation["additional"]
         assert "vessel_name" not in observation["additional"]
+
+    def test_process_track_filters_by_confidence(self, sample_radar_station):
+        """Test that tracks below minimal confidence are filtered out."""
+        track = {
+            "id": 12345,
+            "confidence": 0.3,
+            "last_update": "2026-01-09T12:00:00Z",
+            "track_detection": {
+                "lat": 25.0,
+                "lon": -111.0,
+            },
+        }
+
+        # With minimal_confidence=0.5, track should be filtered out
+        observation = _process_track(track, sample_radar_station, minimal_confidence=0.5)
+        assert observation is None
+
+    def test_process_track_passes_confidence_threshold(self, sample_radar_station):
+        """Test that tracks meeting minimal confidence are processed."""
+        track = {
+            "id": 12345,
+            "confidence": 0.8,
+            "last_update": "2026-01-09T12:00:00Z",
+            "track_detection": {
+                "lat": 25.0,
+                "lon": -111.0,
+            },
+        }
+
+        # With minimal_confidence=0.5, track should pass
+        observation = _process_track(track, sample_radar_station, minimal_confidence=0.5)
+        assert observation is not None
+        assert observation["source"] == "12345"
+
+    def test_process_track_no_confidence_field(self, sample_radar_station):
+        """Test that tracks without confidence field are not filtered."""
+        track = {
+            "id": 12345,
+            "last_update": "2026-01-09T12:00:00Z",
+            "track_detection": {
+                "lat": 25.0,
+                "lon": -111.0,
+            },
+        }
+
+        # Without confidence field, track should pass regardless of threshold
+        observation = _process_track(track, sample_radar_station, minimal_confidence=0.5)
+        assert observation is not None
+        assert observation["source"] == "12345"
 
 
 class TestParseTimestamp:
@@ -365,3 +415,72 @@ class TestActionPullVesselTracking:
             )
 
             mock_deactivate.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_pull_vessel_tracking_filters_by_confidence(
+        self,
+        mock_integration,
+        mock_state_manager,
+    ):
+        """Test that tracks below minimal confidence threshold are filtered out."""
+        response = [
+            {
+                "id": 1,
+                "name": "Test Station",
+                "tracks": [
+                    {
+                        "id": 1,
+                        "confidence": 0.8,
+                        "track_detection": {
+                            "timestamp": "2026-01-09T12:00:00Z",
+                            "lat": 25.0,
+                            "lon": -111.0,
+                        },
+                    },
+                    {
+                        "id": 2,
+                        "confidence": 0.05,  # Below threshold
+                        "track_detection": {
+                            "timestamp": "2026-01-09T12:00:00Z",
+                            "lat": 26.0,
+                            "lon": -112.0,
+                        },
+                    },
+                    {
+                        "id": 3,
+                        "confidence": 0.5,
+                        "track_detection": {
+                            "timestamp": "2026-01-09T12:00:00Z",
+                            "lat": 27.0,
+                            "lon": -113.0,
+                        },
+                    },
+                ],
+            },
+        ]
+
+        mock_client = create_mock_client(response)
+        mock_config = MagicMock()
+        mock_config.api_url = "https://test.example.com/api"
+        mock_config.api_key.get_secret_value.return_value = "test-key"
+        mock_config.minimal_confidence = 0.1
+        mock_config.deactivate_subjects_auto = False
+
+        with patch_handler_dependencies(mock_client, mock_state_manager) as mocks:
+            result = await action_pull_vessel_tracking(
+                integration=mock_integration,
+                action_config=mock_config,
+            )
+
+            # Only 2 tracks should pass (confidence 0.8 and 0.5)
+            # Track with confidence 0.05 should be filtered out
+            assert result["observations_extracted"] == 2
+            assert result["tracks_processed"] == 2
+
+            observations = mocks["send_observations"].call_args.kwargs["observations"]
+            assert len(observations) == 2
+            # Verify the filtered track (id=2) is not included
+            observation_sources = {obs["source"] for obs in observations}
+            assert "1" in observation_sources
+            assert "3" in observation_sources
+            assert "2" not in observation_sources

@@ -116,8 +116,8 @@ def transform_track_to_observation(
     track_detection = track.get("track_detection", {})
     track_id = track.get("id")
 
-    # Use raw track ID as source identifier
-    source_id = str(track_id)
+    # Use track ID as source identifier, fallback to default if not set
+    source_id = str(track_id) if track_id else "default-source"
 
     # Prefer track_detection timestamp, fallback to last_update
     timestamp = track_detection.get("timestamp") or track.get("last_update")
@@ -178,11 +178,21 @@ def parse_timestamp(timestamp_str: str) -> datetime:
 def _process_track(
     track: dict[str, Any],
     radar_station: dict[str, Any],
+    minimal_confidence: float = 0.1,
 ) -> dict[str, Any] | None:
     """Process a single track and return observation if valid.
 
-    Returns None if the track has no valid timestamp.
+    Returns None if the track has no valid timestamp or confidence is below threshold.
     """
+    # Check confidence threshold
+    confidence = track.get("confidence")
+    if confidence is not None and confidence < minimal_confidence:
+        logger.debug(
+            f"Track {track.get('id')} confidence {confidence} is below "
+            f"threshold {minimal_confidence}, skipping"
+        )
+        return None
+
     track_detection = track.get("track_detection", {})
     timestamp_str = track_detection.get("timestamp") or track.get("last_update")
 
@@ -308,7 +318,9 @@ async def action_pull_vessel_tracking(
 
             try:
                 for track in radar_station.get("tracks", []):
-                    observation = _process_track(track, radar_station)
+                    observation = _process_track(
+                        track, radar_station, action_config.minimal_confidence
+                    )
                     if observation:
                         all_observations.append(observation)
                         active_track_ids.add(observation["source"])

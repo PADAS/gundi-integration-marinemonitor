@@ -46,3 +46,14 @@ class PullVesselTrackingConfiguration(PullActionConfiguration):
         title="EarthRanger Token",
         description="Authentication token for EarthRanger API",
     )
+
+    minimal_confidence: float = Field(
+        default=0.1,
+        title="Minimal Confidence",
+        description=(
+            "Minimum confidence threshold for tracks (0.0 to 1.0). "
+            "Tracks with confidence below this value will be filtered out."
+        ),
+        ge=0.0,
+        le=1.0,
+    )

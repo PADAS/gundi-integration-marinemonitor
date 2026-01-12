@@ -291,76 +291,51 @@ async def action_pull_vessel_tracking(
         "radar_stations_failed": 0,
     }
 
-    try:
-        async with MarineMonitorClient(
-            api_url=action_config.api_url,
-            api_key=action_config.api_key.get_secret_value(),
-        ) as client:
-            radar_stations = await client.get_track_markers()
+    async with MarineMonitorClient(
+        api_url=action_config.api_url,
+        api_key=action_config.api_key.get_secret_value(),
+    ) as client:
+        radar_stations = await client.get_track_markers()
+        now = datetime.now(timezone.utc)
+        all_observations: list[dict[str, Any]] = []
+        active_track_ids: set[str] = set()
 
-            await log_action_activity(
+        for radar_station in radar_stations:
+            radar_id = radar_station.get("id")
+            if not radar_id:
+                logger.warning("Skipping radar station without ID")
+                continue
+
+            try:
+                for track in radar_station.get("tracks", []):
+                    observation = _process_track(track, radar_station)
+                    if observation:
+                        all_observations.append(observation)
+                        active_track_ids.add(observation["source"])
+                        results["tracks_processed"] += 1
+
+                results["radar_stations_processed"] += 1
+
+            except Exception as e:
+                logger.exception(f"Failed to process radar station {radar_id}: {e}")
+                results["radar_stations_failed"] += 1
+
+        if all_observations:
+            await send_observations_to_gundi(
+                observations=all_observations,
                 integration_id=integration_id,
-                action_id="pull_vessel_tracking",
-                title=f"Fetched {len(radar_stations)} radar stations from Marine Monitor",
-                level="INFO",
-                data={
-                    "radar_stations_count": len(radar_stations),
-                    "api_url": action_config.api_url,
-                },
             )
+            results["observations_extracted"] = len(all_observations)
+            logger.info(f"Sent {len(all_observations)} observations to Gundi")
 
-            now = datetime.now(timezone.utc)
-            all_observations: list[dict[str, Any]] = []
-            active_track_ids: set[str] = set()
-
-            for radar_station in radar_stations:
-                radar_id = radar_station.get("id")
-                if not radar_id:
-                    logger.warning("Skipping radar station without ID")
-                    continue
-
-                try:
-                    for track in radar_station.get("tracks", []):
-                        observation = _process_track(track, radar_station)
-                        if observation:
-                            all_observations.append(observation)
-                            active_track_ids.add(observation["source"])
-                            results["tracks_processed"] += 1
-
-                    results["radar_stations_processed"] += 1
-
-                except Exception as e:
-                    logger.exception(f"Failed to process radar station {radar_id}: {e}")
-                    results["radar_stations_failed"] += 1
-
-            if all_observations:
-                await send_observations_to_gundi(
-                    observations=all_observations,
-                    integration_id=integration_id,
-                )
-                results["observations_extracted"] = len(all_observations)
-                logger.info(f"Sent {len(all_observations)} observations to Gundi")
-
-            if action_config.deactivate_subjects_auto:
-                results["subjects_deactivated"] = await _handle_stale_subjects(
-                    state_manager=state_manager,
-                    integration_id=integration_id,
-                    er_base_url=action_config.earthranger_base_url,
-                    er_token=action_config.earthranger_token.get_secret_value(),
-                    active_track_ids=active_track_ids,
-                    now=now,
-                )
-
-    except Exception as e:
-        logger.exception(f"Failed to fetch data from Marine Monitor API: {e}")
-        raise
-
-    await log_action_activity(
-        integration_id=integration_id,
-        action_id="pull_vessel_tracking",
-        title=f"Completed: {results['observations_extracted']} observations, {results['subjects_deactivated']} subjects deactivated",
-        level="INFO",
-        data=results,
-    )
+        if action_config.deactivate_subjects_auto:
+            results["subjects_deactivated"] = await _handle_stale_subjects(
+                state_manager=state_manager,
+                integration_id=integration_id,
+                er_base_url=action_config.earthranger_base_url,
+                er_token=action_config.earthranger_token.get_secret_value(),
+                active_track_ids=active_track_ids,
+                now=now,
+            )
 
     return results

@@ -91,12 +91,40 @@ sequenceDiagram
     Note over C: vessel-123 already in state → skipped for assignment ❌
 ```
 
-**Needs tech lead decision** on the right approach (e.g., retry with delay, separate assignment pass on next run, or accept eventual consistency).
+**Resolution:** Retry logic implemented — on each run, known tracks missing a cached `subject_id` are retried. Confirmed working via logs: `Retry succeeded: ... confirms ER timing delay`.
+
+---
+
+## New Issue: Subjects Remain in Default Subject Group
+
+**Observed:** After a successful retry, subjects end up in two groups — the configured group (`earthranger_subject_group_id`) and the site's default subject group (where operators don't want to see vessel tracks).
+
+**Root cause:** When Gundi creates a subject in ER, ER automatically adds it to the site's default subject group. Our connector only adds to the configured group; it never removes from the default.
+
+### What needs to be figured out
+
+1. **Which ER API call removes a subject from a subject group?**
+   - Likely `DELETE /api/v1.0/subjectgroup/{group_id}/subjects/` with a list payload, but needs to be confirmed and added to `er-client` as `remove_subjects_from_subjectgroup`
+
+2. **Which subject group is the default?**
+   - It is configurable per ER site — cannot be hardcoded. Options:
+     - Add a second config field `earthranger_default_subject_group_id` so the operator provides it explicitly
+     - Query ER for subject groups the subject already belongs to and remove from all except the configured one
+
+3. **Permission risks — integration prerequisites for the playbook:**
+   - The Gundi ER token must have **edit permission on the default subject group** — this is not guaranteed and may require a site admin to grant it explicitly
+   - The Gundi ER token must have **edit permission on the configured subject group** — same risk
+   - If either permission is missing, the operation will fail silently (or loudly) and the subject will remain in the wrong group
+   - These should be documented as **prerequisites** in the integration setup playbook before go-live on any new ER site
 
 ---
 
 ## Pending
 
-- [ ] Resolve subject group assignment timing issue (see above)
+- [ ] Confirm ER API endpoint for removing subjects from a subject group
+- [ ] Add `remove_subjects_from_subjectgroup` to `er-client`
+- [ ] Decide how to identify the default subject group (explicit config field vs. query-and-remove)
+- [ ] Implement removal from default group after successful assignment
+- [ ] Document ER token permission requirements in a setup playbook
 - [ ] Update tests to reflect all implementation changes (deferred until ready to push to GitHub)
-- [ ] Merge PR #2 into `main` once timing issue is resolved and tests pass
+- [ ] Merge PR #2 into `main` once above items are resolved and tests pass

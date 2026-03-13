@@ -303,6 +303,10 @@ async def _assign_new_subjects_to_group(
 ) -> int:
     """Assign subjects for new tracks (first appearance) to an EarthRanger subject group.
 
+    Also retries known tracks that previously failed assignment (no cached subject_id),
+    which provides evidence for the timing hypothesis: if retries succeed, it confirms
+    that ER sources weren't ready on the first run.
+
     Returns count of subjects successfully assigned.
     """
     index_state = await state_manager.get_state(
@@ -313,7 +317,26 @@ async def _assign_new_subjects_to_group(
     known_track_ids = set(index_state.get("track_ids", []))
     new_track_ids = active_track_ids - known_track_ids
 
-    if not new_track_ids:
+    # Also retry known tracks that are still missing a subject_id in state
+    # (likely failed on first run due to ER not yet having processed the observation)
+    retry_track_ids = set()
+    for track_id in known_track_ids & active_track_ids:
+        track_state = await state_manager.get_state(
+            integration_id=integration_id,
+            action_id="pull_vessel_tracking",
+            source_id=track_id,
+        )
+        if not track_state.get("subject_id"):
+            retry_track_ids.add(track_id)
+
+    if retry_track_ids:
+        logger.info(
+            f"{len(retry_track_ids)} known track(s) still missing subject_id — retrying assignment: {retry_track_ids}"
+        )
+
+    candidate_track_ids = new_track_ids | retry_track_ids
+
+    if not candidate_track_ids:
         return 0
 
     assigned_count = 0
@@ -321,7 +344,8 @@ async def _assign_new_subjects_to_group(
         service_root=f"{er_base_url}/api/v1.0",
         token=er_token,
     ) as client:
-        for track_id in new_track_ids:
+        for track_id in candidate_track_ids:
+            is_retry = track_id in retry_track_ids
             try:
                 source_response = await client.get_source_by_manufacturer_id(track_id)
                 source = source_response.get("data", source_response)
@@ -342,7 +366,13 @@ async def _assign_new_subjects_to_group(
                     source_id=track_id,
                     state={"subject_id": subject_id},
                 )
-                logger.info(f"Assigned subject '{subject_id}' for track '{track_id}' to group '{group_id}'")
+                if is_retry:
+                    logger.info(
+                        f"Retry succeeded: assigned subject '{subject_id}' for track '{track_id}' to group '{group_id}' "
+                        f"(was missing on previous run — confirms ER timing delay)"
+                    )
+                else:
+                    logger.info(f"Assigned subject '{subject_id}' for track '{track_id}' to group '{group_id}'")
                 assigned_count += 1
             except (ERClientPermissionDenied, ERClientBadCredentials) as e:
                 logger.error(
@@ -351,7 +381,8 @@ async def _assign_new_subjects_to_group(
                 )
                 break  # No point retrying other tracks with the same token
             except Exception as e:
-                logger.warning(f"Failed to assign track '{track_id}' to group '{group_id}': {e}")
+                label = "retry" if is_retry else "assignment"
+                logger.warning(f"Failed {label} for track '{track_id}' to group '{group_id}': {e}")
 
     return assigned_count
 

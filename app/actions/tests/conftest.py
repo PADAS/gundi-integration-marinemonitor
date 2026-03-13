@@ -20,9 +20,7 @@ def mock_pull_config():
     config.api_url = "https://m2mobile.protectedseas.net/api/map/42/earthranger"
     config.api_key.get_secret_value.return_value = "test-api-key"
     config.minimal_confidence = 0.1
-    config.deactivate_subjects_auto = True
-    config.earthranger_base_url = "https://gundi-dev.staging.pamdas.org"
-    config.earthranger_token.get_secret_value.return_value = "test-er-token"
+    config.earthranger_subject_group_id = "ac1413b9-8177-4a81-85d6-a46fc95bdd70"
     return config
 
 
@@ -114,6 +112,30 @@ def sample_radar_station():
 
 
 @pytest.fixture
+def mock_destination():
+    dest = MagicMock()
+    dest.id = "dest-integration-id-456"
+    dest.base_url = "https://gundi-dev.staging.pamdas.org"
+    return dest
+
+
+@pytest.fixture
+def mock_connection(mock_destination):
+    conn = MagicMock()
+    conn.destinations = [mock_destination]
+    return conn
+
+
+@pytest.fixture
+def mock_dest_integration():
+    integration = MagicMock()
+    auth_config = MagicMock()
+    auth_config.data = {"token": "test-er-token"}
+    integration.get_action_config = MagicMock(return_value=auth_config)
+    return integration
+
+
+@pytest.fixture
 def mock_state_manager():
     """Fixture for mock state manager."""
     state_manager = MagicMock()
@@ -139,11 +161,30 @@ def mock_marine_monitor_client(sample_radar_station_response):
 
 
 @contextmanager
-def patch_handler_dependencies(mock_client, mock_state_manager):
+def patch_handler_dependencies(mock_client, mock_state_manager, mock_connection=None, mock_dest_integration=None):
     """Context manager to patch all handler dependencies at once.
 
     Yields a dict with send_observations and log_activity mocks for assertions.
     """
+    if mock_connection is None:
+        dest = MagicMock()
+        dest.id = "dest-integration-id-456"
+        dest.base_url = "https://gundi-dev.staging.pamdas.org"
+        mock_connection = MagicMock()
+        mock_connection.destinations = [dest]
+
+    if mock_dest_integration is None:
+        mock_dest_integration = MagicMock()
+        auth_config = MagicMock()
+        auth_config.data = {"token": "test-er-token"}
+        mock_dest_integration.get_action_config = MagicMock(return_value=auth_config)
+
+    mock_gundi_client = MagicMock()
+    mock_gundi_client.get_connection_details = AsyncMock(return_value=mock_connection)
+    mock_gundi_client.get_integration_details = AsyncMock(return_value=mock_dest_integration)
+    mock_gundi_client.__aenter__ = AsyncMock(return_value=mock_gundi_client)
+    mock_gundi_client.__aexit__ = AsyncMock(return_value=None)
+
     with patch(
         "app.actions.handlers.MarineMonitorClient",
         return_value=mock_client,
@@ -154,10 +195,25 @@ def patch_handler_dependencies(mock_client, mock_state_manager):
         "app.actions.handlers.send_observations_to_gundi",
         new_callable=AsyncMock,
     ) as mock_send, patch(
+        "app.actions.handlers.GundiClient",
+        return_value=mock_gundi_client,
+    ), patch(
+        "app.actions.handlers._assign_new_subjects_to_group",
+        new_callable=AsyncMock,
+    ) as mock_assign, patch(
+        "app.actions.handlers._handle_stale_subjects",
+        new_callable=AsyncMock,
+        return_value=0,
+    ) as mock_stale, patch(
         "app.actions.handlers.log_action_activity",
         new_callable=AsyncMock,
     ), patch(
         "app.services.activity_logger.publish_event",
         new_callable=AsyncMock,
     ):
-        yield {"send_observations": mock_send}
+        yield {
+            "send_observations": mock_send,
+            "assign_subjects": mock_assign,
+            "handle_stale": mock_stale,
+            "gundi_client": mock_gundi_client,
+        }

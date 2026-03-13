@@ -3,8 +3,11 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
+import httpx
+import stamina
 from erclient import AsyncERClient
-from erclient.er_errors import ERClientNotFound
+from erclient.er_errors import ERClientNotFound, ERClientPermissionDenied, ERClientBadCredentials
+from gundi_client_v2 import GundiClient
 
 from app.actions.configurations import PullVesselTrackingConfiguration
 from app.actions.marine_monitor import MarineMonitorClient
@@ -16,14 +19,26 @@ from app.services.state import IntegrationStateManager
 logger = logging.getLogger(__name__)
 
 
+def get_position_date(subject):
+    date_str = subject.get("last_position_date")
+    if not date_str:
+        return datetime.min.replace(tzinfo=timezone.utc)
+    try:
+        return parse_timestamp(date_str)
+    except (ValueError, TypeError):
+        return datetime.min.replace(tzinfo=timezone.utc)
+
+
 async def deactivate_subject_in_earthranger(
     track_id: str,
     er_base_url: str,
     er_token: str,
+    subject_id: str | None = None,
 ) -> bool:
     """Deactivate a subject in EarthRanger by setting is_active to false.
 
-    This function:
+    If subject_id is provided, skips the source/subject lookup and deactivates directly.
+    Otherwise:
     1. Gets the source by manufacturer_id (track_id)
     2. Gets all subjects linked to the source
     3. Picks the subject with the most recent last_position_date
@@ -32,6 +47,7 @@ async def deactivate_subject_in_earthranger(
     :param track_id: The track ID used as manufacturer_id in ER
     :param er_base_url: The EarthRanger base URL
     :param er_token: The EarthRanger auth token
+    :param subject_id: Optional cached subject UUID — skips ER lookup if provided
     :return: True if deactivation was successful, False otherwise
     """
     try:
@@ -39,50 +55,38 @@ async def deactivate_subject_in_earthranger(
             service_root=f"{er_base_url}/api/v1.0",
             token=er_token,
         ) as client:
-            # Step 1: Get source by manufacturer_id (track_id)
-            try:
-                source_response = await client.get_source_by_manufacturer_id(track_id)
-                source = source_response.get("data", source_response)
-            except ERClientNotFound:
-                logger.warning(
-                    f"Source not found for track_id '{track_id}', skipping deactivation"
-                )
-                return False
-
-            source_id = source.get("id")
-            if not source_id:
-                logger.warning(f"Source response missing 'id' for track_id '{track_id}'")
-                return False
-
-            # Step 2: Get subjects linked to the source
-            subjects = await client.get_source_subjects(source_id)
-            if not subjects:
-                logger.info(f"No subjects found for source '{source_id}', nothing to deactivate")
-                return False
-
-            # Step 3: Pick subject with most recent last_position_date
-            def get_position_date(subject):
-                date_str = subject.get("last_position_date")
-                if not date_str:
-                    return datetime.min.replace(tzinfo=timezone.utc)
-                try:
-                    return parse_timestamp(date_str)
-                except (ValueError, TypeError):
-                    return datetime.min.replace(tzinfo=timezone.utc)
-
-            subject_to_deactivate = max(subjects, key=get_position_date)
-            subject_id = subject_to_deactivate.get("id")
-
             if not subject_id:
-                logger.warning("Subject missing 'id' field")
-                return False
+                # Get source by manufacturer_id (track_id)
+                try:
+                    source_response = await client.get_source_by_manufacturer_id(track_id)
+                    source = source_response.get("data", source_response)
+                except ERClientNotFound:
+                    logger.warning(
+                        f"Source not found for track_id '{track_id}', skipping deactivation"
+                    )
+                    return False
 
-            # Check if already inactive
-            if not subject_to_deactivate.get("is_active", True):
-                logger.info(f"Subject '{subject_id}' is already inactive")
-                return True
+                source_id = source.get("id")
+                if not source_id:
+                    logger.warning(f"Source response missing 'id' for track_id '{track_id}'")
+                    return False
 
-            # Step 4: Deactivate the subject
+                subjects = await client.get_source_subjects(source_id)
+                if not subjects:
+                    logger.info(f"No subjects found for source '{source_id}', nothing to deactivate")
+                    return False
+
+                subject_to_deactivate = max(subjects, key=get_position_date)
+                subject_id = subject_to_deactivate.get("id")
+
+                if not subject_id:
+                    logger.warning("Subject missing 'id' field")
+                    return False
+
+                if not subject_to_deactivate.get("is_active", True):
+                    logger.info(f"Subject '{subject_id}' is already inactive")
+                    return True
+
             await client.patch_subject(subject_id, {"is_active": False})
             logger.info(f"Successfully deactivated subject '{subject_id}' for track '{track_id}'")
             return True
@@ -117,7 +121,7 @@ def transform_track_to_observation(
     track_id = track.get("id", track.get("radar_track_id", "unknown-source"))
 
     # Use track ID as source identifier, fallback to default if not set
-    source_id = f"marinemonitor-{track_id}"
+    source_id = f"vessel-{track_id}"
 
     # Prefer track_detection timestamp, fallback to last_update
     timestamp = track_detection.get("timestamp") or track.get("last_update")
@@ -242,10 +246,16 @@ async def _handle_stale_subjects(
     for track_id in stale_track_ids:
         logger.info(f"Track '{track_id}' is stale, attempting to deactivate subject")
 
+        track_state = await state_manager.get_state(
+            integration_id=integration_id,
+            action_id="pull_vessel_tracking",
+            source_id=track_id,
+        )
         deactivated = await deactivate_subject_in_earthranger(
             track_id=track_id,
             er_base_url=er_base_url,
             er_token=er_token,
+            subject_id=track_state.get("subject_id"),
         )
 
         if deactivated:
@@ -266,16 +276,84 @@ async def _handle_stale_subjects(
         source_id="track_index",
     )
 
-    # Store individual state for each active track
+    # Store individual state for each active track, preserving existing fields (e.g. subject_id)
     for track_id in active_track_ids:
+        existing = await state_manager.get_state(
+            integration_id=integration_id,
+            action_id="pull_vessel_tracking",
+            source_id=track_id,
+        )
         await state_manager.set_state(
             integration_id=integration_id,
             action_id="pull_vessel_tracking",
-            state={"last_seen": now.isoformat()},
+            state={**existing, "last_seen": now.isoformat()},
             source_id=track_id,
         )
 
     return deactivated_count
+
+
+async def _assign_new_subjects_to_group(
+    state_manager: IntegrationStateManager,
+    integration_id: str,
+    er_base_url: str,
+    er_token: str,
+    group_id: str,
+    active_track_ids: set[str],
+) -> int:
+    """Assign subjects for new tracks (first appearance) to an EarthRanger subject group.
+
+    Returns count of subjects successfully assigned.
+    """
+    index_state = await state_manager.get_state(
+        integration_id=integration_id,
+        action_id="pull_vessel_tracking",
+        source_id="track_index",
+    )
+    known_track_ids = set(index_state.get("track_ids", []))
+    new_track_ids = active_track_ids - known_track_ids
+
+    if not new_track_ids:
+        return 0
+
+    assigned_count = 0
+    async with AsyncERClient(
+        service_root=f"{er_base_url}/api/v1.0",
+        token=er_token,
+    ) as client:
+        for track_id in new_track_ids:
+            try:
+                source_response = await client.get_source_by_manufacturer_id(track_id)
+                source = source_response.get("data", source_response)
+                source_id = source.get("id")
+                if not source_id:
+                    continue
+                subjects = await client.get_source_subjects(source_id)
+                if not subjects:
+                    continue
+                most_recent = max(subjects, key=get_position_date)
+                subject_id = most_recent.get("id")
+                if not subject_id:
+                    continue
+                await client.add_subjects_to_subjectgroup(group_id, [{"id": subject_id}])
+                await state_manager.set_state(
+                    integration_id=integration_id,
+                    action_id="pull_vessel_tracking",
+                    source_id=track_id,
+                    state={"subject_id": subject_id},
+                )
+                logger.info(f"Assigned subject '{subject_id}' for track '{track_id}' to group '{group_id}'")
+                assigned_count += 1
+            except (ERClientPermissionDenied, ERClientBadCredentials) as e:
+                logger.error(
+                    f"EarthRanger token does not have permission to add subjects to group '{group_id}'. "
+                    f"Check the token's permissions in EarthRanger. Error: {e}"
+                )
+                break  # No point retrying other tracks with the same token
+            except Exception as e:
+                logger.warning(f"Failed to assign track '{track_id}' to group '{group_id}': {e}")
+
+    return assigned_count
 
 
 @crontab_schedule("*/5 * * * *")  # Run every 5 minutes
@@ -340,12 +418,42 @@ async def action_pull_vessel_tracking(
             results["observations_extracted"] = len(all_observations)
             logger.info(f"Sent {len(all_observations)} observations to Gundi")
 
-        if action_config.deactivate_subjects_auto:
-            results["subjects_deactivated"] = await _handle_stale_subjects(
+        async with GundiClient() as gundi:
+            async for attempt in stamina.retry_context(on=httpx.HTTPError, wait_initial=1.0, wait_jitter=5.0, wait_max=32.0):
+                with attempt:
+                    connection = await gundi.get_connection_details(integration_id)
+        if not connection.destinations:
+            logger.warning(f"No destinations configured for integration '{integration_id}', skipping subject deactivation and group assignment")
+        for destination in (connection.destinations or []):
+            dest_base_url = destination.base_url
+            async with GundiClient() as gundi:
+                async for attempt in stamina.retry_context(on=httpx.HTTPError, wait_initial=1.0, wait_jitter=5.0, wait_max=32.0):
+                    with attempt:
+                        dest_integration = await gundi.get_integration_details(str(destination.id))
+            auth_config = dest_integration.get_action_config("auth")
+            if not auth_config or not dest_base_url:
+                logger.warning(f"Destination {destination.id} missing base_url or auth config, skipping")
+                continue
+            dest_token = auth_config.data.get("token")
+            if not dest_token:
+                logger.warning(f"Destination {destination.id} auth config missing token, skipping")
+                continue
+
+            if action_config.earthranger_subject_group_id:
+                await _assign_new_subjects_to_group(
+                    state_manager=state_manager,
+                    integration_id=integration_id,
+                    er_base_url=dest_base_url,
+                    er_token=dest_token,
+                    group_id=action_config.earthranger_subject_group_id,
+                    active_track_ids=active_track_ids,
+                )
+
+            results["subjects_deactivated"] += await _handle_stale_subjects(
                 state_manager=state_manager,
                 integration_id=integration_id,
-                er_base_url=action_config.earthranger_base_url,
-                er_token=action_config.earthranger_token.get_secret_value(),
+                er_base_url=dest_base_url,
+                er_token=dest_token,
                 active_track_ids=active_track_ids,
                 now=now,
             )

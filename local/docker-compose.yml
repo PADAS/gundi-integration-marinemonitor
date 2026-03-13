@@ -48,6 +48,10 @@ services:
       - "5678:5678"
     volumes:
       - ../app:/code/app
+      - ../../er-client:/er-client
+    command: >
+      sh -c "pip install -e /er-client --quiet &&
+             python -m debugpy --listen 0.0.0.0:5678 -m uvicorn app.main:app --host 0.0.0.0 --port 8080 --reload"
     env_file:
       - path: ".env.local"
         required: true

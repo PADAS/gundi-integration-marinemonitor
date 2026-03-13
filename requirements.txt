@@ -116,7 +116,6 @@ pydantic==1.10.26
     #   fastapi
     #   gundi-client-v2
     #   gundi-core
-pyjq==2.6.0
     # via -r requirements-base.in
 pyjwt==2.9.0
     # via gcloud-aio-auth

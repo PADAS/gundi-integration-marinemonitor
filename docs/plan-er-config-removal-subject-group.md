@@ -69,6 +69,28 @@ Subject group assignment currently fails on first run because ER sources don't e
 
 **Root cause:** `send_observations_to_gundi` sends to Gundi, which asynchronously forwards to ER. We immediately call ER to look up the source by `manufacturer_id`, but ER hasn't processed it yet → 404. The track is then saved to state as "known" with no `subject_id`. Future runs treat it as already-known and skip assignment.
 
+```mermaid
+sequenceDiagram
+    participant C as Connector
+    participant G as Gundi
+    participant ER as EarthRanger
+
+    Note over C: Run 1 — new track appears
+    C->>G: send_observations_to_gundi(vessel-123)
+    G-->>C: ack
+    Note over G,ER: Gundi forwards async (takes time)
+    C->>ER: get_source_by_manufacturer_id(vessel-123)
+    ER-->>C: 404 Not Found ❌
+    Note over C: track saved to state as known (no subject_id)
+
+    Note over G,ER: ...Gundi eventually creates source + subject in ER
+    ER-->>ER: source vessel-123 created ✓
+
+    Note over C: Run 2 — same track still active
+    C->>G: send_observations_to_gundi(vessel-123)
+    Note over C: vessel-123 already in state → skipped for assignment ❌
+```
+
 **Needs tech lead decision** on the right approach (e.g., retry with delay, separate assignment pass on next run, or accept eventual consistency).
 
 ---

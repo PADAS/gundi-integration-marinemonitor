@@ -20,7 +20,7 @@ def mock_pull_config():
     config.api_url = "https://m2mobile.protectedseas.net/api/map/42/earthranger"
     config.api_key.get_secret_value.return_value = "test-api-key"
     config.minimal_confidence = 0.1
-    config.earthranger_subject_group_id = "ac1413b9-8177-4a81-85d6-a46fc95bdd70"
+    config.earthranger_subject_group_name = "Marine Monitor"
     return config
 
 
@@ -185,6 +185,11 @@ def patch_handler_dependencies(mock_client, mock_state_manager, mock_connection=
     mock_gundi_client.__aenter__ = AsyncMock(return_value=mock_gundi_client)
     mock_gundi_client.__aexit__ = AsyncMock(return_value=None)
 
+    mock_er_client = MagicMock()
+    mock_er_client.post_sensor_observation = AsyncMock()
+    mock_er_client.__aenter__ = AsyncMock(return_value=mock_er_client)
+    mock_er_client.__aexit__ = AsyncMock(return_value=None)
+
     with patch(
         "app.actions.handlers.MarineMonitorClient",
         return_value=mock_client,
@@ -192,15 +197,12 @@ def patch_handler_dependencies(mock_client, mock_state_manager, mock_connection=
         "app.actions.handlers.IntegrationStateManager",
         return_value=mock_state_manager,
     ), patch(
-        "app.actions.handlers.send_observations_to_gundi",
-        new_callable=AsyncMock,
-    ) as mock_send, patch(
+        "app.actions.handlers.AsyncERClient",
+        return_value=mock_er_client,
+    ), patch(
         "app.actions.handlers.GundiClient",
         return_value=mock_gundi_client,
     ), patch(
-        "app.actions.handlers._assign_new_subjects_to_group",
-        new_callable=AsyncMock,
-    ) as mock_assign, patch(
         "app.actions.handlers._handle_stale_subjects",
         new_callable=AsyncMock,
         return_value=0,
@@ -212,8 +214,7 @@ def patch_handler_dependencies(mock_client, mock_state_manager, mock_connection=
         new_callable=AsyncMock,
     ):
         yield {
-            "send_observations": mock_send,
-            "assign_subjects": mock_assign,
+            "er_client": mock_er_client,
             "handle_stale": mock_stale,
             "gundi_client": mock_gundi_client,
         }

@@ -10,7 +10,6 @@ from app.actions.handlers import (
     parse_timestamp,
     action_pull_vessel_tracking,
     deactivate_subject_in_earthranger,
-    _assign_new_subjects_to_group,
     _process_track,
 )
 from app.actions.tests.conftest import create_mock_client, patch_handler_dependencies
@@ -286,11 +285,10 @@ class TestActionPullVesselTracking:
             assert result["tracks_processed"] == 1
             assert result["radar_stations_failed"] == 0
 
-            # Verify observations were sent to Gundi
-            mocks["send_observations"].assert_called_once()
-            observations = mocks["send_observations"].call_args.kwargs["observations"]
-            assert len(observations) == 1
-            assert observations[0]["source"] == "vessel-48590736"  # track id with prefix
+            # Verify observations were sent to EarthRanger
+            assert mocks["er_client"].post_sensor_observation.call_count == 1
+            payload = mocks["er_client"].post_sensor_observation.call_args[0][0]
+            assert payload["manufacturer_id"] == "vessel-48590736"  # track id with prefix
 
     @pytest.mark.asyncio
     async def test_pull_vessel_tracking_no_tracks(
@@ -310,7 +308,7 @@ class TestActionPullVesselTracking:
 
             assert result["observations_extracted"] == 0
             assert result["tracks_processed"] == 0
-            mocks["send_observations"].assert_not_called()
+            mocks["er_client"].post_sensor_observation.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_pull_vessel_tracking_api_error(
@@ -405,7 +403,7 @@ class TestActionPullVesselTracking:
         mock_config.api_url = "https://test.example.com/api"
         mock_config.api_key.get_secret_value.return_value = "test-key"
         mock_config.minimal_confidence = 0.1
-        mock_config.earthranger_subject_group_id = None
+        mock_config.earthranger_subject_group_name = None
 
         with patch_handler_dependencies(
             mock_marine_monitor_client, mock_state_manager
@@ -416,7 +414,6 @@ class TestActionPullVesselTracking:
             )
 
             mocks["handle_stale"].assert_called_once()
-            mocks["assign_subjects"].assert_not_called()
 
     @pytest.mark.asyncio
     async def test_pull_vessel_tracking_filters_by_confidence(
@@ -466,7 +463,7 @@ class TestActionPullVesselTracking:
         mock_config.api_url = "https://test.example.com/api"
         mock_config.api_key.get_secret_value.return_value = "test-key"
         mock_config.minimal_confidence = 0.1
-        mock_config.earthranger_subject_group_id = None
+        mock_config.earthranger_subject_group_name = None
 
         with patch_handler_dependencies(mock_client, mock_state_manager) as mocks:
             result = await action_pull_vessel_tracking(
@@ -479,131 +476,55 @@ class TestActionPullVesselTracking:
             assert result["observations_extracted"] == 2
             assert result["tracks_processed"] == 2
 
-            observations = mocks["send_observations"].call_args.kwargs["observations"]
-            assert len(observations) == 2
-            # Verify the filtered track (id=2) is not included
-            observation_sources = {obs["source"] for obs in observations}
-            assert "vessel-1" in observation_sources
-            assert "vessel-3" in observation_sources
-            assert "vessel-2" not in observation_sources
-
-
-class TestAssignNewSubjectsToGroup:
-    """Tests for _assign_new_subjects_to_group function."""
+            assert mocks["er_client"].post_sensor_observation.call_count == 2
+            payloads = [call[0][0] for call in mocks["er_client"].post_sensor_observation.call_args_list]
+            manufacturer_ids = {p["manufacturer_id"] for p in payloads}
+            assert "vessel-1" in manufacturer_ids
+            assert "vessel-3" in manufacturer_ids
+            assert "vessel-2" not in manufacturer_ids
 
     @pytest.mark.asyncio
-    async def test_assigns_new_tracks(self, mock_state_manager):
-        """Test that subjects for new tracks are assigned to the group."""
-        mock_state_manager.get_state = AsyncMock(return_value={"track_ids": []})
+    async def test_pull_vessel_tracking_includes_subject_group_in_payload(
+        self,
+        mock_integration,
+        mock_marine_monitor_client,
+        mock_state_manager,
+    ):
+        """Test that subject_groups is included in the payload when group name is configured."""
+        mock_config = MagicMock()
+        mock_config.api_url = "https://test.example.com/api"
+        mock_config.api_key.get_secret_value.return_value = "test-key"
+        mock_config.minimal_confidence = 0.1
+        mock_config.earthranger_subject_group_name = "Marine Monitor"
 
-        mock_client = MagicMock()
-        mock_client.get_source_by_manufacturer_id = AsyncMock(
-            return_value={"data": {"id": "source-uuid"}}
-        )
-        mock_client.get_source_subjects = AsyncMock(
-            return_value=[
-                {"id": "subject-old", "last_position_date": "2026-01-01T00:00:00Z"},
-                {"id": "subject-new", "last_position_date": "2026-01-09T12:00:00Z"},
-            ]
-        )
-        mock_client.add_subjects_to_subjectgroup = AsyncMock(return_value=[])
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=None)
-
-        with patch("app.actions.handlers.AsyncERClient", return_value=mock_client):
-            count = await _assign_new_subjects_to_group(
-                state_manager=mock_state_manager,
-                integration_id="integration-123",
-                er_base_url="https://test.pamdas.org",
-                er_token="test-token",
-                group_id="group-uuid",
-                active_track_ids={"vessel-48590736"},
+        with patch_handler_dependencies(mock_marine_monitor_client, mock_state_manager) as mocks:
+            await action_pull_vessel_tracking(
+                integration=mock_integration,
+                action_config=mock_config,
             )
 
-        assert count == 1
-        # Should pick the most recent subject, not just subjects[0]
-        mock_client.add_subjects_to_subjectgroup.assert_called_once_with(
-            "group-uuid", [{"id": "subject-new"}]
-        )
+            payload = mocks["er_client"].post_sensor_observation.call_args[0][0]
+            assert payload["subject_groups"] == ["Marine Monitor"]
 
     @pytest.mark.asyncio
-    async def test_skips_known_tracks(self, mock_state_manager):
-        """Test that already-known tracks with a cached subject_id are not re-assigned."""
-        async def fake_get_state(integration_id, action_id, source_id):
-            if source_id == "track_index":
-                return {"track_ids": ["vessel-48590736"]}
-            return {"subject_id": "cached-subject-id", "last_seen": "2026-01-09T12:00:00Z"}
+    async def test_pull_vessel_tracking_omits_subject_group_when_not_configured(
+        self,
+        mock_integration,
+        mock_marine_monitor_client,
+        mock_state_manager,
+    ):
+        """Test that subject_groups is not included in the payload when no group name is configured."""
+        mock_config = MagicMock()
+        mock_config.api_url = "https://test.example.com/api"
+        mock_config.api_key.get_secret_value.return_value = "test-key"
+        mock_config.minimal_confidence = 0.1
+        mock_config.earthranger_subject_group_name = None
 
-        mock_state_manager.get_state = fake_get_state
-
-        mock_client = MagicMock()
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=None)
-
-        with patch("app.actions.handlers.AsyncERClient", return_value=mock_client):
-            count = await _assign_new_subjects_to_group(
-                state_manager=mock_state_manager,
-                integration_id="integration-123",
-                er_base_url="https://test.pamdas.org",
-                er_token="test-token",
-                group_id="group-uuid",
-                active_track_ids={"vessel-48590736"},
+        with patch_handler_dependencies(mock_marine_monitor_client, mock_state_manager) as mocks:
+            await action_pull_vessel_tracking(
+                integration=mock_integration,
+                action_config=mock_config,
             )
 
-        assert count == 0
-        mock_client.get_source_by_manufacturer_id.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_source_not_found_in_er(self, mock_state_manager):
-        """Test that missing group logs warning and returns 0."""
-        mock_state_manager.get_state = AsyncMock(return_value={"track_ids": []})
-
-        mock_client = MagicMock()
-        mock_client.get_source_by_manufacturer_id = AsyncMock(
-            side_effect=ERClientNotFound("not found")
-        )
-        mock_client.add_subjects_to_subjectgroup = AsyncMock(return_value=[])
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=None)
-
-        with patch("app.actions.handlers.AsyncERClient", return_value=mock_client):
-            count = await _assign_new_subjects_to_group(
-                state_manager=mock_state_manager,
-                integration_id="integration-123",
-                er_base_url="https://test.pamdas.org",
-                er_token="test-token",
-                group_id="group-uuid",
-                active_track_ids={"vessel-99999"},
-            )
-
-        assert count == 0
-        mock_client.add_subjects_to_subjectgroup.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_source_not_found_continues(self, mock_state_manager):
-        """Test that missing source for a track doesn't stop other tracks."""
-        mock_state_manager.get_state = AsyncMock(return_value={"track_ids": []})
-
-        mock_client = MagicMock()
-        mock_client.get_subjectgroups = AsyncMock(
-            return_value=[{"id": "group-uuid", "name": "Marine Monitor Vessels"}]
-        )
-        mock_client.get_source_by_manufacturer_id = AsyncMock(
-            return_value={"data": {}}  # no 'id' in source
-        )
-        mock_client.add_subjects_to_subjectgroup = AsyncMock(return_value=[])
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=None)
-
-        with patch("app.actions.handlers.AsyncERClient", return_value=mock_client):
-            count = await _assign_new_subjects_to_group(
-                state_manager=mock_state_manager,
-                integration_id="integration-123",
-                er_base_url="https://test.pamdas.org",
-                er_token="test-token",
-                group_id="group-uuid",
-                active_track_ids={"vessel-99999"},
-            )
-
-        assert count == 0
-        mock_client.add_subjects_to_subjectgroup.assert_not_called()
+            payload = mocks["er_client"].post_sensor_observation.call_args[0][0]
+            assert "subject_groups" not in payload

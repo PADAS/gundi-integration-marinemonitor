@@ -10,8 +10,8 @@ Every 5 minutes the connector:
 
 1. **Fetches radar station data** from the Marine Monitor API, including all active vessel tracks per station
 2. **Filters tracks** below a configurable confidence threshold
-3. **Sends observations to Gundi** — one observation per track, formatted as `tracking-device` / `vehicle` subject type
-4. **Assigns new vessels to a subject group** in EarthRanger (optional) — on a vessel's first appearance, its EarthRanger subject is added to the configured group
+3. **Sends observations directly to EarthRanger** via the generic sensor handler endpoint (`/api/v1.0/sensors/generic/{provider_key}/status`) — one observation per track, formatted as `tracking-device` / `vehicle` subject type
+4. **Assigns vessels to a subject group** in EarthRanger (optional) — subjects are assigned to the configured group at creation time
 5. **Deactivates stale subjects** in EarthRanger — vessels that have disappeared from the API are marked as inactive
 
 ---
@@ -24,27 +24,26 @@ When setting up an integration in the Gundi portal, the following fields are req
 |---|---|---|
 | `api_url` | Yes | Full Marine Monitor API URL including account ID. Example: `https://m2mobile.protectedseas.net/api/map/42/earthranger` |
 | `api_key` | Yes | API key for the Marine Monitor API (sent as Authorization header) |
-| `earthranger_subject_group_id` | No | UUID of the EarthRanger subject group to assign new vessel subjects to. If omitted, group assignment is skipped |
+| `earthranger_subject_group_name` | No | Name of the EarthRanger subject group to assign vessel subjects to. The group will be created automatically if it does not exist. If omitted, subjects are added to ER's default group |
 | `minimal_confidence` | No (default `0.1`) | Confidence threshold (0.0–1.0). Tracks below this value are ignored |
 
 **EarthRanger credentials are not configured here.** The connector reads the ER URL and token automatically from the destination integration record in Gundi.
 
 ---
 
-## Observations sent to Gundi
+## Observations sent to EarthRanger
 
-Each vessel track is sent as:
+Each vessel track is posted directly to EarthRanger's generic sensor handler. The source provider key is set to `gundi_marinemonitor_<integration_id>`. The payload looks like:
 
 ```json
 {
-  "source": "marinemonitor-<track_id>",
-  "type": "tracking-device",
-  "subject_type": "vehicle",
+  "manufacturer_id": "vessel-<track_id>",
   "recorded_at": "<ISO timestamp>",
   "location": {
     "lat": 25.811533,
     "lon": -111.306303
   },
+  "subject_groups": ["Marine Monitor"],
   "additional": {
     "speed_kmph": 5.5,
     "heading": 356.0,
@@ -61,14 +60,16 @@ Each vessel track is sent as:
 }
 ```
 
+`subject_groups` is only included when `earthranger_subject_group_name` is configured.
+
 ---
 
 ## Expected behavior in EarthRanger
 
-- Each vessel track creates a **source** (identified by `manufacturer_id` = `marinemonitor-<track_id>`) and a linked **subject** of type `vehicle` / subtype `vessel`
-- On first appearance, if `earthranger_subject_group_id` is configured, the subject is added to that group
+- Each vessel track creates a **source** (identified by `manufacturer_id` = `vessel-<track_id>`) and a linked **subject** of type `vehicle` / subtype `vessel`, under the source provider `gundi_marinemonitor_<integration_id>`
+- If `earthranger_subject_group_name` is configured, the subject is assigned to that group at creation time. The group is created in ER automatically if it doesn't exist
 - When a vessel stops appearing in the API, its subject is set to `is_active: false`
-- The subject with the most recent `last_position_date` is used for both group assignment and deactivation
+- The subject with the most recent `last_position_date` is used for deactivation
 
 ---
 
@@ -77,7 +78,7 @@ Each vessel track is sent as:
 The connector uses Gundi's state manager (Redis-backed) to track vessels across runs:
 
 - `track_index` — stores the full list of known track IDs and the last run timestamp
-- Per-track state — stores `last_seen` timestamp and `subject_id` (cached on first assignment to avoid redundant ER lookups on deactivation)
+- Per-track state — stores `last_seen` timestamp used for stale subject detection
 
 ---
 

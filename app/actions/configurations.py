@@ -24,10 +24,10 @@ class PullVesselTrackingConfiguration(PullActionConfiguration):
         description="Marine Monitor token for authentication",
     )
 
-    earthranger_subject_group_id: Optional[str] = Field(
+    earthranger_subject_group_name: Optional[str] = Field(
         None,
-        title="EarthRanger Subject Group ID",
-        description="UUID of the EarthRanger subject group to assign new vessel subjects to.",
+        title="EarthRanger Subject Group Name",
+        description="Name of the EarthRanger subject group to assign vessel subjects to. The group will be created if it does not exist.",
     )
 
     minimal_confidence: float = Field(

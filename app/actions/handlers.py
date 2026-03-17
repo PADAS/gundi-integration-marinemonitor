@@ -1,8 +1,9 @@
 """Action handlers for Marine Monitor integration."""
 import logging
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Optional
 
+import backoff
 import httpx
 import stamina
 from erclient import AsyncERClient
@@ -13,7 +14,6 @@ from app.actions.configurations import PullVesselTrackingConfiguration
 from app.actions.marine_monitor import MarineMonitorClient
 from app.services.action_scheduler import crontab_schedule
 from app.services.activity_logger import activity_logger, log_action_activity
-from app.services.gundi import send_observations_to_gundi
 from app.services.state import IntegrationStateManager
 
 logger = logging.getLogger(__name__)
@@ -293,98 +293,18 @@ async def _handle_stale_subjects(
     return deactivated_count
 
 
-async def _assign_new_subjects_to_group(
-    state_manager: IntegrationStateManager,
-    integration_id: str,
-    er_base_url: str,
-    er_token: str,
-    group_id: str,
-    active_track_ids: set[str],
-) -> int:
-    """Assign subjects for new tracks (first appearance) to an EarthRanger subject group.
 
-    Also retries known tracks that previously failed assignment (no cached subject_id),
-    which provides evidence for the timing hypothesis: if retries succeed, it confirms
-    that ER sources weren't ready on the first run.
-
-    Returns count of subjects successfully assigned.
-    """
-    index_state = await state_manager.get_state(
-        integration_id=integration_id,
-        action_id="pull_vessel_tracking",
-        source_id="track_index",
-    )
-    known_track_ids = set(index_state.get("track_ids", []))
-    new_track_ids = active_track_ids - known_track_ids
-
-    # Also retry known tracks that are still missing a subject_id in state
-    # (likely failed on first run due to ER not yet having processed the observation)
-    retry_track_ids = set()
-    for track_id in known_track_ids & active_track_ids:
-        track_state = await state_manager.get_state(
-            integration_id=integration_id,
-            action_id="pull_vessel_tracking",
-            source_id=track_id,
-        )
-        if not track_state.get("subject_id"):
-            retry_track_ids.add(track_id)
-
-    if retry_track_ids:
-        logger.info(
-            f"{len(retry_track_ids)} known track(s) still missing subject_id — retrying assignment: {retry_track_ids}"
-        )
-
-    candidate_track_ids = new_track_ids | retry_track_ids
-
-    if not candidate_track_ids:
-        return 0
-
-    assigned_count = 0
-    async with AsyncERClient(
-        service_root=f"{er_base_url}/api/v1.0",
-        token=er_token,
-    ) as client:
-        for track_id in candidate_track_ids:
-            is_retry = track_id in retry_track_ids
-            try:
-                source_response = await client.get_source_by_manufacturer_id(track_id)
-                source = source_response.get("data", source_response)
-                source_id = source.get("id")
-                if not source_id:
-                    continue
-                subjects = await client.get_source_subjects(source_id)
-                if not subjects:
-                    continue
-                most_recent = max(subjects, key=get_position_date)
-                subject_id = most_recent.get("id")
-                if not subject_id:
-                    continue
-                await client.add_subjects_to_subjectgroup(group_id, [{"id": subject_id}])
-                await state_manager.set_state(
-                    integration_id=integration_id,
-                    action_id="pull_vessel_tracking",
-                    source_id=track_id,
-                    state={"subject_id": subject_id},
-                )
-                if is_retry:
-                    logger.info(
-                        f"Retry succeeded: assigned subject '{subject_id}' for track '{track_id}' to group '{group_id}' "
-                        f"(was missing on previous run — confirms ER timing delay)"
-                    )
-                else:
-                    logger.info(f"Assigned subject '{subject_id}' for track '{track_id}' to group '{group_id}'")
-                assigned_count += 1
-            except (ERClientPermissionDenied, ERClientBadCredentials) as e:
-                logger.error(
-                    f"EarthRanger token does not have permission to add subjects to group '{group_id}'. "
-                    f"Check the token's permissions in EarthRanger. Error: {e}"
-                )
-                break  # No point retrying other tracks with the same token
-            except Exception as e:
-                label = "retry" if is_retry else "assignment"
-                logger.warning(f"Failed {label} for track '{track_id}' to group '{group_id}': {e}")
-
-    return assigned_count
+@backoff.on_exception(backoff.expo, Exception, max_tries=5, jitter=backoff.full_jitter)
+async def _post_observation_to_er(client: AsyncERClient, observation: dict, subject_group_name: Optional[str] = None) -> None:
+    payload = {
+        "manufacturer_id": observation["source"],
+        "recorded_at": observation["recorded_at"],
+        "location": observation["location"],
+        "additional": observation.get("additional", {}),
+    }
+    if subject_group_name:
+        payload["subject_groups"] = [subject_group_name]
+    await client.post_sensor_observation(payload)
 
 
 @crontab_schedule("*/5 * * * *")  # Run every 5 minutes
@@ -441,14 +361,6 @@ async def action_pull_vessel_tracking(
                 logger.exception(f"Failed to process radar station {radar_id}: {e}")
                 results["radar_stations_failed"] += 1
 
-        if all_observations:
-            await send_observations_to_gundi(
-                observations=all_observations,
-                integration_id=integration_id,
-            )
-            results["observations_extracted"] = len(all_observations)
-            logger.info(f"Sent {len(all_observations)} observations to Gundi")
-
         async with GundiClient() as gundi:
             async for attempt in stamina.retry_context(on=httpx.HTTPError, wait_initial=1.0, wait_jitter=5.0, wait_max=32.0):
                 with attempt:
@@ -470,15 +382,16 @@ async def action_pull_vessel_tracking(
                 logger.warning(f"Destination {destination.id} auth config missing token, skipping")
                 continue
 
-            if action_config.earthranger_subject_group_id:
-                await _assign_new_subjects_to_group(
-                    state_manager=state_manager,
-                    integration_id=integration_id,
-                    er_base_url=dest_base_url,
-                    er_token=dest_token,
-                    group_id=action_config.earthranger_subject_group_id,
-                    active_track_ids=active_track_ids,
-                )
+            if all_observations:
+                async with AsyncERClient(
+                    service_root=f"{dest_base_url}/api/v1.0",
+                    token=dest_token,
+                    provider_key=f"gundi_marinemonitor_{integration_id}",
+                ) as er_client:
+                    for observation in all_observations:
+                        await _post_observation_to_er(er_client, observation, action_config.earthranger_subject_group_name)
+                results["observations_extracted"] = len(all_observations)
+                logger.info(f"Sent {len(all_observations)} observations to EarthRanger at {dest_base_url}")
 
             results["subjects_deactivated"] += await _handle_stale_subjects(
                 state_manager=state_manager,

@@ -23,11 +23,34 @@ class TestTransformTrackToObservation:
         observation = transform_track_to_observation(sample_track, sample_radar_station)
 
         assert observation["source"] == "vessel-48590736"  # track id with prefix
+        assert observation["subject_name"] == "vessel-48590736 (Test Vessel)"
         assert observation["type"] == "tracking-device"
         assert observation["subject_type"] == "vehicle"
         assert observation["recorded_at"] == "2026-01-09T12:19:23Z"
         assert observation["location"]["lat"] == 25.811533
         assert observation["location"]["lon"] == -111.306303
+
+    def test_transform_track_with_vessel_name_uses_vessel_name_as_subject_name(self, sample_radar_station):
+        """Test that vessel_name is used as subject_name when present."""
+        track = {
+            "id": 48590736,
+            "vessel_name": "My Vessel",
+            "last_update": "2026-01-09T12:00:00Z",
+            "track_detection": {"lat": 25.0, "lon": -111.0},
+        }
+        observation = transform_track_to_observation(track, sample_radar_station)
+        assert observation["subject_name"] == "vessel-48590736 (My Vessel)"
+
+    def test_transform_track_without_vessel_name_falls_back_to_manufacturer_id(self, sample_radar_station):
+        """Test that subject_name falls back to manufacturer_id when vessel_name is empty."""
+        track = {
+            "id": 48590736,
+            "vessel_name": "",
+            "last_update": "2026-01-09T12:00:00Z",
+            "track_detection": {"lat": 25.0, "lon": -111.0},
+        }
+        observation = transform_track_to_observation(track, sample_radar_station)
+        assert observation["subject_name"] == "vessel-48590736"
 
     def test_transform_includes_track_detection_fields(self, sample_track, sample_radar_station):
         """Test that track_detection fields are included in additional."""
@@ -289,6 +312,7 @@ class TestActionPullVesselTracking:
             assert mocks["er_client"].post_sensor_observation.call_count == 1
             payload = mocks["er_client"].post_sensor_observation.call_args[0][0]
             assert payload["manufacturer_id"] == "vessel-48590736"  # track id with prefix
+            assert payload["subject_name"] == "vessel-48590736 (Test Vessel)"
 
     @pytest.mark.asyncio
     async def test_pull_vessel_tracking_no_tracks(

@@ -118,10 +118,12 @@ def transform_track_to_observation(
     :return: Observation in Gundi schema format
     """
     track_detection = track.get("track_detection", {})
-    track_id = track.get("id", track.get("radar_track_id", "unknown-source"))
+    track_id = track.get("id", "unknown-source")
 
     # Use track ID as source identifier, fallback to default if not set
     source_id = f"vessel-{track_id}"
+    vessel_name = track.get("vessel_name")
+    subject_name = f"{source_id} ({vessel_name})" if vessel_name else source_id
 
     # Prefer track_detection timestamp, fallback to last_update
     timestamp = track_detection.get("timestamp") or track.get("last_update")
@@ -148,6 +150,7 @@ def transform_track_to_observation(
 
     return {
         "source": source_id,
+        "subject_name": subject_name,
         "type": "tracking-device",
         "subject_type": "vehicle",
         "recorded_at": timestamp,
@@ -298,6 +301,7 @@ async def _handle_stale_subjects(
 async def _post_observation_to_er(client: AsyncERClient, observation: dict, subject_group_name: Optional[str] = None) -> None:
     payload = {
         "manufacturer_id": observation["source"],
+        "subject_name": observation["subject_name"],
         "recorded_at": observation["recorded_at"],
         "location": observation["location"],
         "additional": observation.get("additional", {}),

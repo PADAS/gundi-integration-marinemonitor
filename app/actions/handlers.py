@@ -35,64 +35,64 @@ async def deactivate_subject_in_earthranger(
     er_token: str,
     subject_id: str | None = None,
 ) -> bool:
-    """Deactivate a subject in EarthRanger by setting is_active to false.
+    """Delete a stale vessel subject and its source from EarthRanger.
 
-    If subject_id is provided, skips the source/subject lookup and deactivates directly.
-    Otherwise:
+    Always looks up the source by manufacturer_id (needed for source deletion).
+    If subject_id is provided, skips the subjects lookup.
+
+    WARNING: Irreversible — deleted subjects and sources lose all observation history.
+
     1. Gets the source by manufacturer_id (track_id)
-    2. Gets all subjects linked to the source
-    3. Picks the subject with the most recent last_position_date
-    4. Deactivates that subject
+    2. If no subject_id: gets all subjects linked to the source, picks most recent
+    3. Deletes the subject
+    4. Deletes the source
 
     :param track_id: The track ID used as manufacturer_id in ER
     :param er_base_url: The EarthRanger base URL
     :param er_token: The EarthRanger auth token
-    :param subject_id: Optional cached subject UUID — skips ER lookup if provided
-    :return: True if deactivation was successful, False otherwise
+    :param subject_id: Optional cached subject UUID — skips subjects lookup if provided
+    :return: True if deletion was successful, False otherwise
     """
     try:
         async with AsyncERClient(
             service_root=f"{er_base_url}/api/v1.0",
             token=er_token,
         ) as client:
+            # Always look up source — needed for source deletion
+            try:
+                source_response = await client.get_source_by_manufacturer_id(track_id)
+                source = source_response.get("data", source_response)
+            except ERClientNotFound:
+                logger.warning(
+                    f"Source not found for track_id '{track_id}', skipping deletion"
+                )
+                return False
+
+            source_id = source.get("id")
+            if not source_id:
+                logger.warning(f"Source response missing 'id' for track_id '{track_id}'")
+                return False
+
             if not subject_id:
-                # Get source by manufacturer_id (track_id)
-                try:
-                    source_response = await client.get_source_by_manufacturer_id(track_id)
-                    source = source_response.get("data", source_response)
-                except ERClientNotFound:
-                    logger.warning(
-                        f"Source not found for track_id '{track_id}', skipping deactivation"
-                    )
-                    return False
-
-                source_id = source.get("id")
-                if not source_id:
-                    logger.warning(f"Source response missing 'id' for track_id '{track_id}'")
-                    return False
-
                 subjects = await client.get_source_subjects(source_id)
                 if not subjects:
-                    logger.info(f"No subjects found for source '{source_id}', nothing to deactivate")
+                    logger.info(f"No subjects found for source '{source_id}', nothing to delete")
                     return False
 
-                subject_to_deactivate = max(subjects, key=get_position_date)
-                subject_id = subject_to_deactivate.get("id")
+                subject_to_delete = max(subjects, key=get_position_date)
+                subject_id = subject_to_delete.get("id")
 
                 if not subject_id:
                     logger.warning("Subject missing 'id' field")
                     return False
 
-                if not subject_to_deactivate.get("is_active", True):
-                    logger.info(f"Subject '{subject_id}' is already inactive")
-                    return True
-
-            await client.patch_subject(subject_id, {"is_active": False})
-            logger.info(f"Successfully deactivated subject '{subject_id}' for track '{track_id}'")
+            await client.delete_subject(subject_id)
+            await client.delete_source(source_id)
+            logger.info(f"Deleted subject '{subject_id}' and source '{source_id}' for track '{track_id}'")
             return True
 
     except Exception as e:
-        logger.exception(f"Failed to deactivate subject for track_id '{track_id}': {e}")
+        logger.exception(f"Failed to delete subject/source for track_id '{track_id}': {e}")
         return False
 
 

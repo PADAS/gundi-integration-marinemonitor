@@ -221,7 +221,7 @@ class TestDeactivateSubjectInEarthRanger:
 
     @pytest.mark.asyncio
     async def test_deactivate_subject_success(self):
-        """Test successful subject deactivation."""
+        """Test successful subject and source deletion."""
         mock_client = MagicMock()
         mock_client.get_source_by_manufacturer_id = AsyncMock(
             return_value={"data": {"id": "source-uuid-123", "manufacturer_id": "48590736"}}
@@ -230,12 +230,12 @@ class TestDeactivateSubjectInEarthRanger:
             return_value=[
                 {
                     "id": "subject-uuid",
-                    "is_active": True,
                     "last_position_date": "2026-01-09T12:00:00Z",
                 }
             ]
         )
-        mock_client.patch_subject = AsyncMock(return_value={"is_active": False})
+        mock_client.delete_subject = AsyncMock(return_value=None)
+        mock_client.delete_source = AsyncMock(return_value=None)
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=None)
 
@@ -247,24 +247,18 @@ class TestDeactivateSubjectInEarthRanger:
             )
 
         assert result is True
-        mock_client.patch_subject.assert_called_once_with("subject-uuid", {"is_active": False})
+        mock_client.delete_subject.assert_called_once_with("subject-uuid")
+        mock_client.delete_source.assert_called_once_with("source-uuid-123")
 
     @pytest.mark.asyncio
-    async def test_deactivate_subject_already_inactive(self):
-        """Test when subject is already inactive."""
+    async def test_deactivate_subject_with_cached_subject_id(self):
+        """Test that cached subject_id skips subjects lookup but still looks up source."""
         mock_client = MagicMock()
         mock_client.get_source_by_manufacturer_id = AsyncMock(
             return_value={"data": {"id": "source-uuid-123"}}
         )
-        mock_client.get_source_subjects = AsyncMock(
-            return_value=[
-                {
-                    "id": "subject-uuid",
-                    "is_active": False,  # Already inactive
-                    "last_position_date": "2026-01-09T12:00:00Z",
-                }
-            ]
-        )
+        mock_client.delete_subject = AsyncMock(return_value=None)
+        mock_client.delete_source = AsyncMock(return_value=None)
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=None)
 
@@ -273,12 +267,13 @@ class TestDeactivateSubjectInEarthRanger:
                 track_id="48590736",
                 er_base_url="https://test.pamdas.org",
                 er_token="test-token",
+                subject_id="cached-subject-uuid",
             )
 
         assert result is True
-        # Should not call patch_subject since already inactive
-        mock_client.patch_subject = AsyncMock()
-        assert not mock_client.patch_subject.called
+        mock_client.get_source_subjects.assert_not_called()
+        mock_client.delete_subject.assert_called_once_with("cached-subject-uuid")
+        mock_client.delete_source.assert_called_once_with("source-uuid-123")
 
 
 class TestActionPullVesselTracking:

@@ -10,7 +10,7 @@
 
 This work spanned two repos:
 - **gundi-integration-marinemonitor** (this repo) — main connector changes
-- **er-client** (`/Users/victorl/Documents/Code/er-client`) — add `add_subjects_to_subjectgroup` to `AsyncERClient`
+- **er-client** (https://github.com/PADAS/er-client) — add `add_subjects_to_subjectgroup` to `AsyncERClient`
 
 ---
 
@@ -40,19 +40,18 @@ async def add_subjects_to_subjectgroup(self, group_id, subjects):
 
 **`app/actions/configurations.py`**
 - Removed `earthranger_base_url`, `earthranger_token`, `deactivate_subjects_auto`
-- Added `earthranger_subject_group_id: Optional[str]` — UUID of the ER subject group (not name)
+- Added `earthranger_subject_group_name: Optional[str]` — human-readable group name (DAS does get_or_create by name)
 
 **`app/actions/handlers.py`**
 - ER credentials now fetched at runtime via `GundiClient.get_connection_details()` → `get_integration_details()` → `get_action_config("auth")`
-- Added `_assign_new_subjects_to_group()` — assigns new vessel subjects to ER group on first appearance, caches `subject_id` in per-track state
+- Observations posted directly to EarthRanger via `AsyncERClient.post_sensor_observation()` (generic sensor handler), bypassing `send_observations_to_gundi` — this supports `subject_groups` in the payload for group assignment at creation time
+- `_assign_new_subjects_to_group()` was considered but not implemented — group assignment is handled by the sensor handler payload instead
 - `deactivate_subjects_auto` removed — deactivation always runs
-- `get_position_date` extracted to module level (reused by both deactivation and group assignment)
 - Source prefix changed from `marinemonitor-` to `vessel-`
-- `subject_id` cached in per-track state on first assignment to skip ER source/subject lookup on deactivation
 
 **`app/actions/tests/conftest.py`** and **`test_handlers.py`**
-- Updated to remove old config fields, add GundiClient mocks, add `TestAssignNewSubjectsToGroup` tests
-- Tests use `group_id` (UUID), not `group_name`
+- Updated to remove old config fields, add GundiClient and AsyncERClient mocks
+- Tests assert `subject_groups` in ER payload when group name is configured
 
 **Other changes:**
 - `requirements.txt` — removed `pyjq==2.6.0` (unused, incompatible with Python 3.14)

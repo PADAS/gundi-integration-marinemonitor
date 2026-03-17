@@ -164,7 +164,10 @@ def mock_marine_monitor_client(sample_radar_station_response):
 def patch_handler_dependencies(mock_client, mock_state_manager, mock_connection=None, mock_dest_integration=None):
     """Context manager to patch all handler dependencies at once.
 
-    Yields a dict with send_observations and log_activity mocks for assertions.
+    Yields a dict with keys:
+      - "er_client": mock AsyncERClient instance (check post_sensor_observation calls)
+      - "handle_stale": mock _handle_stale_subjects coroutine
+      - "gundi_client": mock GundiClient instance
     """
     if mock_connection is None:
         dest = MagicMock()

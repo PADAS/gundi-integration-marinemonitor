@@ -297,7 +297,11 @@ async def _handle_stale_subjects(
 
 
 
-@backoff.on_exception(backoff.expo, Exception, max_tries=5, jitter=backoff.full_jitter)
+def _is_permanent_er_error(e: Exception) -> bool:
+    return isinstance(e, (ERClientBadCredentials, ERClientPermissionDenied))
+
+
+@backoff.on_exception(backoff.expo, Exception, max_tries=5, jitter=backoff.full_jitter, giveup=_is_permanent_er_error)
 async def _post_observation_to_er(client: AsyncERClient, observation: dict, subject_group_name: Optional[str] = None) -> None:
     payload = {
         "manufacturer_id": observation["source"],

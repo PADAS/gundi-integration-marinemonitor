@@ -3,8 +3,6 @@ import pytest
 from datetime import timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from erclient.er_errors import ERClientNotFound
-
 from app.actions.handlers import (
     transform_track_to_observation,
     parse_timestamp,

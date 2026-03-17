@@ -10,9 +10,9 @@ class PullVesselTrackingConfiguration(PullActionConfiguration):
 
     api_url: str = Field(
         ...,
-        title="Integration URL",
+        title="Marine Monitor API URL",
         description=(
-            "Full Marine Monitor API URL"
+            "Full Marine Monitor API URL. "
             "Example: https://m2mobile.protectedseas.net/api/map/0/earthranger/trackmarkers"
         ),
         min_length=1,
@@ -20,8 +20,8 @@ class PullVesselTrackingConfiguration(PullActionConfiguration):
 
     api_key: SecretStr = Field(
         ...,
-        title="Integration Token",
-        description="Marine Monitor token for authentication",
+        title="Marine Monitor API Key",
+        description="Marine Monitor API key for authentication",
     )
 
     earthranger_subject_group_name: Optional[str] = Field(

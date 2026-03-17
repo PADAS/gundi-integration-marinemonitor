@@ -38,6 +38,7 @@ Each vessel track is posted directly to EarthRanger's generic sensor handler. Th
 ```json
 {
   "manufacturer_id": "vessel-<track_id>",
+  "subject_name": "vessel-<track_id> (Vessel Name)",
   "recorded_at": "<ISO timestamp>",
   "location": {
     "lat": 25.811533,
@@ -59,6 +60,8 @@ Each vessel track is posted directly to EarthRanger's generic sensor handler. Th
   }
 }
 ```
+
+`subject_name` is set to `"vessel-<track_id> (vessel_name)"` when `vessel_name` is available, otherwise falls back to `"vessel-<track_id>"`. This ensures unique, human-readable subject names even when multiple vessels share the same name. Note: DAS only sets `subject_name` on first subject creation — existing subjects will not be renamed.
 
 `subject_groups` is only included when `earthranger_subject_group_name` is configured.
 

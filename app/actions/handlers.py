@@ -269,7 +269,7 @@ async def _handle_stale_subjects(
                 action_id="pull_vessel_tracking",
                 source_id=track_id,
             )
-            logger.info(f"Deactivated and removed track '{track_id}' from state")
+            logger.info(f"Deleted subject/source for stale track '{track_id}' and removed from state")
 
     # Update track index with currently active tracks
     await state_manager.set_state(
@@ -395,6 +395,7 @@ async def action_pull_vessel_tracking(
                     integration_id=integration_id,
                     action_id="pull_vessel_tracking",
                     title=f"Sending {len(all_observations)} vessel observations to EarthRanger",
+                    level=logging.INFO,
                     data={"vessels": [o["subject_name"] for o in all_observations]},
                 )
                 async with AsyncERClient(
@@ -421,6 +422,7 @@ async def action_pull_vessel_tracking(
         integration_id=integration_id,
         action_id="pull_vessel_tracking",
         title=f"Finished: {results['observations_extracted']} observations sent, {results['subjects_deactivated']} stale vessels removed",
+        level=logging.INFO,
         data={"updated_vessels": updated_vessels},
     )
 

@@ -33,7 +33,7 @@ When setting up an integration in the Gundi portal, the following fields are req
 
 ## Observations sent to EarthRanger
 
-Each vessel track is posted directly to EarthRanger's generic sensor handler. The source provider key is set to `gundi_marinemonitor_<integration_id>`. The payload looks like:
+Each vessel track is posted directly to EarthRanger's generic sensor handler. The source provider key is set to `gundi_marine_monitor_<integration_id>`. The payload looks like:
 
 ```json
 {
@@ -66,7 +66,7 @@ Each vessel track is posted directly to EarthRanger's generic sensor handler. Th
 
 ## Expected behavior in EarthRanger
 
-- Each vessel track creates a **source** (identified by `manufacturer_id` = `vessel-<track_id>`) and a linked **subject** of type `vehicle` / subtype `vessel`, under the source provider `gundi_marinemonitor_<integration_id>`
+- Each vessel track creates a **source** (identified by `manufacturer_id` = `vessel-<track_id>`) and a linked **subject** of type `vehicle` / subtype `vessel`, under the source provider `gundi_marine_monitor_<integration_id>`
 - If `earthranger_subject_group_name` is configured, the subject is assigned to that group at creation time. The group is created in ER automatically if it doesn't exist
 - When a vessel stops appearing in the API, its subject is set to `is_active: false`
 - The subject with the most recent `last_position_date` is used for deactivation

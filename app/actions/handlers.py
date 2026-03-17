@@ -386,7 +386,7 @@ async def action_pull_vessel_tracking(
                 async with AsyncERClient(
                     service_root=f"{dest_base_url}/api/v1.0",
                     token=dest_token,
-                    provider_key=f"gundi_marinemonitor_{integration_id}",
+                    provider_key=f"gundi_marine_monitor_{integration_id}",
                 ) as er_client:
                     for observation in all_observations:
                         await _post_observation_to_er(er_client, observation, action_config.earthranger_subject_group_name)

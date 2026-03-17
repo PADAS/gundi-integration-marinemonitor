@@ -391,6 +391,12 @@ async def action_pull_vessel_tracking(
                 continue
 
             if all_observations:
+                await log_action_activity(
+                    integration_id=integration_id,
+                    action_id="pull_vessel_tracking",
+                    title=f"Sending {len(all_observations)} vessel observations to EarthRanger",
+                    data={"vessels": [o["subject_name"] for o in all_observations]},
+                )
                 async with AsyncERClient(
                     service_root=f"{dest_base_url}/api/v1.0",
                     token=dest_token,
@@ -409,5 +415,13 @@ async def action_pull_vessel_tracking(
                 active_track_ids=active_track_ids,
                 now=now,
             )
+
+    updated_vessels = list({o["subject_name"] for o in all_observations})
+    await log_action_activity(
+        integration_id=integration_id,
+        action_id="pull_vessel_tracking",
+        title=f"Finished: {results['observations_extracted']} observations sent, {results['subjects_deactivated']} stale vessels removed",
+        data={"updated_vessels": updated_vessels},
+    )
 
     return results

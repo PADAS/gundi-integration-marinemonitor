@@ -1,0 +1,15 @@
+# Override for local er-client development.
+#
+# Use this when you need to test unreleased er-client changes alongside the connector.
+# Requires a sibling checkout of https://github.com/PADAS/er-client at ../../er-client.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.override.yml up --build
+
+services:
+  fastapi:
+    volumes:
+      - ../../er-client:/er-client
+    command: >
+      sh -c "pip install -e /er-client --quiet &&
+             python -m debugpy --listen 0.0.0.0:5678 -m uvicorn app.main:app --host 0.0.0.0 --port 8080 --reload"

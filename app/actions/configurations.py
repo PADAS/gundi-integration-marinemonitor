@@ -1,4 +1,6 @@
 """Configuration models for Marine Monitor integration actions."""
+from typing import Optional
+
 from pydantic import Field, SecretStr
 from app.actions.core import PullActionConfiguration
 
@@ -8,43 +10,24 @@ class PullVesselTrackingConfiguration(PullActionConfiguration):
 
     api_url: str = Field(
         ...,
-        title="API URL",
+        title="Marine Monitor API URL",
         description=(
-            "Full API URL for Marine Monitor including account ID. "
-            "Example: https://m2mobile.protectedseas.net/api/map/42/earthranger"
+            "Full Marine Monitor API URL. "
+            "Example: https://m2mobile.protectedseas.net/api/map/0/earthranger/trackmarkers"
         ),
         min_length=1,
     )
 
     api_key: SecretStr = Field(
         ...,
-        title="API Key",
-        description="API key for authentication (sent in Authorization header).",
+        title="Marine Monitor API Key",
+        description="Marine Monitor API key for authentication",
     )
 
-    deactivate_subjects_auto: bool = Field(
-        default=True,
-        title="Auto-deactivate Subjects",
-        description=(
-            "Automatically deactivate vessel subjects in EarthRanger when they "
-            "stop appearing in Marine Monitor API"
-        ),
-    )
-
-    earthranger_base_url: str = Field(
-        ...,
-        title="EarthRanger Base URL",
-        description=(
-            "Base URL for EarthRanger API "
-            "(e.g., https://gundi-dev.staging.pamdas.org)"
-        ),
-        min_length=1,
-    )
-
-    earthranger_token: SecretStr = Field(
-        ...,
-        title="EarthRanger Token",
-        description="Authentication token for EarthRanger API",
+    earthranger_subject_group_name: Optional[str] = Field(
+        None,
+        title="EarthRanger Subject Group Name",
+        description="Name of the EarthRanger subject group to assign vessel subjects to. The group will be created if it does not exist.",
     )
 
     minimal_confidence: float = Field(

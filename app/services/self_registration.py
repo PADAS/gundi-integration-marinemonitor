@@ -110,6 +110,10 @@ async def register_integration_in_gundi(gundi_client, type_slug=None, service_ur
         on=httpx.HTTPError, wait_initial=datetime.timedelta(seconds=1), attempts=3
     ):
         with attempt:
-            response = await gundi_client.register_integration_type(data)
+            try:
+                response = await gundi_client.register_integration_type(data)
+            except httpx.HTTPStatusError as e:
+                logger.error(f"Registration failed: {e.response.status_code} {e.request.url}")
+                raise
     logger.info(f"Registering integration type '{integration_type_slug}'...DONE")
     return response

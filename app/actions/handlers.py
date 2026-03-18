@@ -88,7 +88,7 @@ async def delete_vessel_from_earthranger(
 
             await client.delete_subject(subject_id)
             await client.delete_source(source_id)
-            logger.info(f"Deleted vessel '{track_id}' from EarthRanger (subject: {subject_id}, source: {source_id})")
+            logger.info(f"Requested deletion of vessel '{track_id}' from EarthRanger (subject: {subject_id}, source: {source_id})")
             return True
 
     except Exception as e:
@@ -267,7 +267,7 @@ async def _remove_stale_vessels(
                 action_id="pull_vessel_tracking",
                 source_id=track_id,
             )
-            logger.info(f"Deleted vessel '{track_id}' from EarthRanger and removed from Redis")
+            logger.info(f"Requested deletion of vessel '{track_id}' from EarthRanger and removed from Redis")
 
     # Save updated known vessels list to Redis with current timestamp
     await state_manager.set_state(

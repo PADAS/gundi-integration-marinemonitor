@@ -486,9 +486,11 @@ async def action_delete_vessel(
                     dest_integration = await gundi.get_integration_details(str(destination.id))
         auth_config = dest_integration.get_action_config("auth")
         if not auth_config or not dest_base_url:
+            logger.warning(f"Destination {destination.id} missing base_url or auth config, skipping")
             continue
         dest_token = auth_config.data.get("token")
         if not dest_token:
+            logger.warning(f"Destination {destination.id} auth config missing token, skipping")
             continue
 
         deleted = deleted or await delete_vessel_from_earthranger(

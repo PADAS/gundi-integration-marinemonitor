@@ -15,3 +15,5 @@ def get_action_handler_by_data_type(type_name: str):
 
 
 action_handlers = setup_action_handlers()
+import logging
+logging.getLogger(__name__).info(f"Discovered actions: {list(action_handlers.keys())}")

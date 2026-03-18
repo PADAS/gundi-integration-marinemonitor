@@ -141,6 +141,7 @@ def mock_state_manager():
     state_manager = MagicMock()
     state_manager.get_state = AsyncMock(return_value={})
     state_manager.set_state = AsyncMock()
+    state_manager.delete_state = AsyncMock()
     return state_manager
 
 
@@ -166,7 +167,7 @@ def patch_handler_dependencies(mock_client, mock_state_manager, mock_connection=
 
     Yields a dict with keys:
       - "er_client": mock AsyncERClient instance (check post_sensor_observation calls)
-      - "handle_stale": mock _handle_stale_subjects coroutine
+      - "remove_stale": mock _remove_stale_vessels coroutine
       - "gundi_client": mock GundiClient instance
     """
     if mock_connection is None:
@@ -206,9 +207,9 @@ def patch_handler_dependencies(mock_client, mock_state_manager, mock_connection=
         "app.actions.handlers.GundiClient",
         return_value=mock_gundi_client,
     ), patch(
-        "app.actions.handlers._handle_stale_subjects",
+        "app.actions.handlers._remove_stale_vessels",
         new_callable=AsyncMock,
-        return_value=0,
+        return_value=[],
     ) as mock_stale, patch(
         "app.actions.handlers.log_action_activity",
         new_callable=AsyncMock,
@@ -218,6 +219,6 @@ def patch_handler_dependencies(mock_client, mock_state_manager, mock_connection=
     ):
         yield {
             "er_client": mock_er_client,
-            "handle_stale": mock_stale,
+            "remove_stale": mock_stale,
             "gundi_client": mock_gundi_client,
         }

@@ -38,24 +38,19 @@ async def delete_vessel_from_earthranger(
     track_id: str,
     er_base_url: str,
     er_token: str,
-    subject_id: str | None = None,
 ) -> bool:
     """Delete a stale vessel subject and its source from EarthRanger.
-
-    Always looks up the source by manufacturer_id (needed for source deletion).
-    If subject_id is provided, skips the subjects lookup.
 
     WARNING: Irreversible — deleted subjects and sources lose all observation history.
 
     1. Gets the source by manufacturer_id (track_id)
-    2. If no subject_id: gets all subjects linked to the source, picks most recent
+    2. Gets all subjects linked to the source, picks most recent
     3. Deletes the subject
-    4. Deletes the source
+    4. Deletes the source (async)
 
     :param track_id: The vessel ID used as manufacturer_id in ER
     :param er_base_url: The EarthRanger base URL
     :param er_token: The EarthRanger auth token
-    :param subject_id: Optional cached subject UUID — skips subjects lookup if provided
     :return: True if deletion was successful, False otherwise
     """
     try:
@@ -63,7 +58,6 @@ async def delete_vessel_from_earthranger(
             service_root=f"{er_base_url}/api/v1.0",
             token=er_token,
         ) as client:
-            # Always look up source — needed for source deletion
             try:
                 source_response = await client.get_source_by_manufacturer_id(track_id)
                 source = source_response.get("data", source_response)
@@ -78,18 +72,17 @@ async def delete_vessel_from_earthranger(
                 logger.warning(f"Source response missing 'id' for track_id '{track_id}'")
                 return False
 
+            subjects = await client.get_source_subjects(source_id)
+            if not subjects:
+                logger.info(f"No subjects found for vessel '{track_id}', skipping deletion")
+                return False
+
+            subject_to_delete = max(subjects, key=get_position_date)
+            subject_id = subject_to_delete.get("id")
+
             if not subject_id:
-                subjects = await client.get_source_subjects(source_id)
-                if not subjects:
-                    logger.info(f"No subjects found for vessel '{track_id}', skipping deletion")
-                    return False
-
-                subject_to_delete = max(subjects, key=get_position_date)
-                subject_id = subject_to_delete.get("id")
-
-                if not subject_id:
-                    logger.warning("Subject missing 'id' field")
-                    return False
+                logger.warning("Subject missing 'id' field")
+                return False
 
             await client.delete_subject(subject_id)
             await client.delete_source(source_id, async_mode=True)
@@ -253,16 +246,10 @@ async def _remove_stale_vessels(
     for track_id in stale_vessel_ids:
         logger.info(f"Vessel '{track_id}' is stale, removing from EarthRanger")
 
-        vessel_state = await state_manager.get_state(
-            integration_id=integration_id,
-            action_id="pull_vessel_tracking",
-            source_id=track_id,
-        )
         deleted = await delete_vessel_from_earthranger(
             track_id=track_id,
             er_base_url=er_base_url,
             er_token=er_token,
-            subject_id=vessel_state.get("subject_id"),
         )
 
         if deleted:
@@ -282,7 +269,7 @@ async def _remove_stale_vessels(
         source_id="known_vessels",
     )
 
-    # Store individual state for each active vessel, preserving existing fields (e.g. subject_id)
+    # Store individual state for each active vessel, preserving existing fields
     for track_id in active_track_ids:
         existing = await state_manager.get_state(
             integration_id=integration_id,
@@ -466,7 +453,6 @@ async def action_get_vessel_state(
         )
         vessels.append({
             "track_id": track_id,
-            "subject_id": vessel_state.get("subject_id"),
             "last_seen": vessel_state.get("last_seen"),
         })
 
@@ -485,13 +471,6 @@ async def action_delete_vessel(
     state_manager = IntegrationStateManager()
     integration_id = str(integration.id)
     track_id = f"vessel-{action_config.vessel_id}"
-
-    vessel_state = await state_manager.get_state(
-        integration_id=integration_id,
-        action_id="pull_vessel_tracking",
-        source_id=track_id,
-    )
-    subject_id = vessel_state.get("subject_id")
 
     deleted = False
     async with GundiClient() as gundi:
@@ -516,7 +495,6 @@ async def action_delete_vessel(
             track_id=track_id,
             er_base_url=dest_base_url,
             er_token=dest_token,
-            subject_id=subject_id,
         )
 
     if deleted:
@@ -538,7 +516,7 @@ async def action_delete_vessel(
             source_id="known_vessels",
         )
 
-    return {"track_id": track_id, "subject_id": subject_id, "deleted": deleted}
+    return {"track_id": track_id, "deleted": deleted}
 
 
 @activity_logger()

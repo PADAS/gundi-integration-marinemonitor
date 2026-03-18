@@ -92,7 +92,7 @@ async def delete_vessel_from_earthranger(
                     return False
 
             await client.delete_subject(subject_id)
-            await client.delete_source(source_id)
+            await client.delete_source(source_id, async_mode=True)
             logger.info(f"Requested deletion of vessel '{track_id}' from EarthRanger (subject: {subject_id}, source: {source_id})")
             return True
 
@@ -228,15 +228,15 @@ async def _remove_stale_vessels(
     er_token: str,
     active_track_ids: set[str],
     now: datetime,
-) -> int:
+) -> list[str]:
     """Delete stale vessels from EarthRanger and update Redis state.
 
     Compares currently active vessels with the known vessels list stored in Redis.
     Deletes vessels from EarthRanger that are no longer appearing in the API.
 
-    Returns the number of vessels deleted.
+    Returns the list of deleted track_ids.
     """
-    deleted_count = 0
+    deleted_track_ids: list[str] = []
 
     # Load known vessels list from Redis to find which vessels we saw last run
     # ToDo: Use state manager Groups (redis set) as in the ATS integration, once available in the template repo
@@ -266,7 +266,7 @@ async def _remove_stale_vessels(
         )
 
         if deleted:
-            deleted_count += 1
+            deleted_track_ids.append(track_id)
             await state_manager.delete_state(
                 integration_id=integration_id,
                 action_id="pull_vessel_tracking",
@@ -296,7 +296,7 @@ async def _remove_stale_vessels(
             source_id=track_id,
         )
 
-    return deleted_count
+    return deleted_track_ids
 
 
 
@@ -394,6 +394,7 @@ async def action_pull_vessel_tracking(
                 continue
 
             if all_observations:
+                logger.info(f"Sending {len(all_observations)} vessel observations to EarthRanger at {dest_base_url}")
                 await log_action_activity(
                     integration_id=integration_id,
                     action_id="pull_vessel_tracking",
@@ -411,7 +412,7 @@ async def action_pull_vessel_tracking(
                 results["observations_extracted"] = len(all_observations)
                 logger.info(f"Sent {len(all_observations)} observations to EarthRanger at {dest_base_url}")
 
-            results["vessels_deleted"] += await _remove_stale_vessels(
+            deleted_track_ids = await _remove_stale_vessels(
                 state_manager=state_manager,
                 integration_id=integration_id,
                 er_base_url=dest_base_url,
@@ -419,6 +420,15 @@ async def action_pull_vessel_tracking(
                 active_track_ids=active_track_ids,
                 now=now,
             )
+            if deleted_track_ids:
+                await log_action_activity(
+                    integration_id=integration_id,
+                    action_id="pull_vessel_tracking",
+                    title=f"Removed {len(deleted_track_ids)} stale vessels from EarthRanger",
+                    level=logging.INFO,
+                    data={"removed_vessels": deleted_track_ids},
+                )
+            results["vessels_deleted"] += len(deleted_track_ids)
 
     updated_vessels = list({o["subject_name"] for o in all_observations})
     await log_action_activity(
@@ -502,7 +512,7 @@ async def action_delete_vessel(
         if not dest_token:
             continue
 
-        deleted = await delete_vessel_from_earthranger(
+        deleted = deleted or await delete_vessel_from_earthranger(
             track_id=track_id,
             er_base_url=dest_base_url,
             er_token=dest_token,

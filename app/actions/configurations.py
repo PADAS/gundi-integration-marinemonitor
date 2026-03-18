@@ -2,7 +2,7 @@
 from typing import Optional
 
 from pydantic import Field, SecretStr
-from app.actions.core import PullActionConfiguration, GenericActionConfiguration
+from app.actions.core import PullActionConfiguration, GenericActionConfiguration, ExecutableActionMixin
 
 
 class PullVesselTrackingConfiguration(PullActionConfiguration):
@@ -42,19 +42,25 @@ class PullVesselTrackingConfiguration(PullActionConfiguration):
     )
 
 
-class GetVesselStateConfiguration(GenericActionConfiguration):
-    """No configuration needed — returns current vessel state from Redis."""
-    pass
-
-
-class DeleteVesselConfiguration(GenericActionConfiguration):
-    vessel_id: str = Field(
-        ...,
-        title="Vessel ID",
-        description="The vessel ID to delete (e.g. 4134321). Use action_get_vessel_state to find known IDs.",
+class GetVesselStateConfiguration(ExecutableActionMixin, GenericActionConfiguration):
+    notes: Optional[str] = Field(
+        None,
+        title="Notes",
+        description="Optional notes (not used). Returns current vessel state from Redis.",
     )
 
 
-class ClearVesselStateConfiguration(GenericActionConfiguration):
-    """No configuration needed — clears all vessel state from Redis."""
-    pass
+class DeleteVesselConfiguration(ExecutableActionMixin, GenericActionConfiguration):
+    vessel_id: str = Field(
+        ...,
+        title="Vessel ID",
+        description="The raw Marine Monitor vessel ID to delete (e.g. 4134321, without the 'vessel-' prefix). Use action_get_vessel_state to find known IDs.",
+    )
+
+
+class ClearVesselStateConfiguration(ExecutableActionMixin, GenericActionConfiguration):
+    notes: Optional[str] = Field(
+        None,
+        title="Notes",
+        description="Optional notes (not used). Clears all vessel state from Redis.",
+    )

@@ -207,10 +207,17 @@ def patch_handler_dependencies(mock_client, mock_state_manager, mock_connection=
         "app.actions.handlers.GundiClient",
         return_value=mock_gundi_client,
     ), patch(
-        "app.actions.handlers._remove_stale_vessels",
+        "app.actions.handlers._get_stale_vessel_ids",
+        new_callable=AsyncMock,
+        return_value=set(),
+    ), patch(
+        "app.actions.handlers._delete_stale_vessels_from_er",
         new_callable=AsyncMock,
         return_value=[],
     ) as mock_stale, patch(
+        "app.actions.handlers._update_vessel_state",
+        new_callable=AsyncMock,
+    ), patch(
         "app.actions.handlers.log_action_activity",
         new_callable=AsyncMock,
     ), patch(

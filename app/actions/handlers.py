@@ -10,7 +10,12 @@ from erclient import AsyncERClient
 from erclient.er_errors import ERClientNotFound, ERClientPermissionDenied, ERClientBadCredentials
 from gundi_client_v2 import GundiClient
 
-from app.actions.configurations import PullVesselTrackingConfiguration
+from app.actions.configurations import (
+    PullVesselTrackingConfiguration,
+    GetVesselStateConfiguration,
+    DeleteVesselConfiguration,
+    ClearVesselStateConfiguration,
+)
 from app.actions.marine_monitor import MarineMonitorClient
 from app.services.action_scheduler import crontab_schedule
 from app.services.activity_logger import activity_logger, log_action_activity
@@ -425,3 +430,133 @@ async def action_pull_vessel_tracking(
     )
 
     return results
+
+
+@activity_logger()
+async def action_get_vessel_state(
+    integration,
+    action_config: GetVesselStateConfiguration,
+) -> dict:
+    state_manager = IntegrationStateManager()
+    integration_id = str(integration.id)
+
+    known_vessels_state = await state_manager.get_state(
+        integration_id=integration_id,
+        action_id="pull_vessel_tracking",
+        source_id="known_vessels",
+    )
+    track_ids = known_vessels_state.get("track_ids", [])
+
+    vessels = []
+    for track_id in track_ids:
+        vessel_state = await state_manager.get_state(
+            integration_id=integration_id,
+            action_id="pull_vessel_tracking",
+            source_id=track_id,
+        )
+        vessels.append({
+            "track_id": track_id,
+            "subject_id": vessel_state.get("subject_id"),
+            "last_seen": vessel_state.get("last_seen"),
+        })
+
+    return {
+        "total": len(vessels),
+        "last_updated": known_vessels_state.get("last_run"),
+        "known_vessels": vessels,
+    }
+
+
+@activity_logger()
+async def action_delete_vessel(
+    integration,
+    action_config: DeleteVesselConfiguration,
+) -> dict:
+    state_manager = IntegrationStateManager()
+    integration_id = str(integration.id)
+    track_id = f"vessel-{action_config.vessel_id}"
+
+    vessel_state = await state_manager.get_state(
+        integration_id=integration_id,
+        action_id="pull_vessel_tracking",
+        source_id=track_id,
+    )
+    subject_id = vessel_state.get("subject_id")
+
+    deleted = False
+    async with GundiClient() as gundi:
+        async for attempt in stamina.retry_context(on=httpx.HTTPError, wait_initial=1.0, wait_jitter=5.0, wait_max=32.0):
+            with attempt:
+                connection = await gundi.get_connection_details(integration_id)
+
+    for destination in (connection.destinations or []):
+        dest_base_url = destination.base_url
+        async with GundiClient() as gundi:
+            async for attempt in stamina.retry_context(on=httpx.HTTPError, wait_initial=1.0, wait_jitter=5.0, wait_max=32.0):
+                with attempt:
+                    dest_integration = await gundi.get_integration_details(str(destination.id))
+        auth_config = dest_integration.get_action_config("auth")
+        if not auth_config or not dest_base_url:
+            continue
+        dest_token = auth_config.data.get("token")
+        if not dest_token:
+            continue
+
+        deleted = await delete_vessel_from_earthranger(
+            track_id=track_id,
+            er_base_url=dest_base_url,
+            er_token=dest_token,
+            subject_id=subject_id,
+        )
+
+    if deleted:
+        await state_manager.delete_state(
+            integration_id=integration_id,
+            action_id="pull_vessel_tracking",
+            source_id=track_id,
+        )
+        known_vessels_state = await state_manager.get_state(
+            integration_id=integration_id,
+            action_id="pull_vessel_tracking",
+            source_id="known_vessels",
+        )
+        updated_ids = [t for t in known_vessels_state.get("track_ids", []) if t != track_id]
+        await state_manager.set_state(
+            integration_id=integration_id,
+            action_id="pull_vessel_tracking",
+            state={**known_vessels_state, "track_ids": updated_ids},
+            source_id="known_vessels",
+        )
+
+    return {"track_id": track_id, "subject_id": subject_id, "deleted": deleted}
+
+
+@activity_logger()
+async def action_clear_vessel_state(
+    integration,
+    action_config: ClearVesselStateConfiguration,
+) -> dict:
+    state_manager = IntegrationStateManager()
+    integration_id = str(integration.id)
+
+    known_vessels_state = await state_manager.get_state(
+        integration_id=integration_id,
+        action_id="pull_vessel_tracking",
+        source_id="known_vessels",
+    )
+    track_ids = known_vessels_state.get("track_ids", [])
+
+    for track_id in track_ids:
+        await state_manager.delete_state(
+            integration_id=integration_id,
+            action_id="pull_vessel_tracking",
+            source_id=track_id,
+        )
+
+    await state_manager.delete_state(
+        integration_id=integration_id,
+        action_id="pull_vessel_tracking",
+        source_id="known_vessels",
+    )
+
+    return {"vessels_cleared": len(track_ids)}

@@ -2,7 +2,7 @@
 from typing import Optional
 
 from pydantic import Field, SecretStr
-from app.actions.core import PullActionConfiguration
+from app.actions.core import PullActionConfiguration, GenericActionConfiguration
 
 
 class PullVesselTrackingConfiguration(PullActionConfiguration):
@@ -40,3 +40,21 @@ class PullVesselTrackingConfiguration(PullActionConfiguration):
         ge=0.0,
         le=1.0,
     )
+
+
+class GetVesselStateConfiguration(GenericActionConfiguration):
+    """No configuration needed — returns current vessel state from Redis."""
+    pass
+
+
+class DeleteVesselConfiguration(GenericActionConfiguration):
+    vessel_id: str = Field(
+        ...,
+        title="Vessel ID",
+        description="The vessel ID to delete (e.g. 4134321). Use action_get_vessel_state to find known IDs.",
+    )
+
+
+class ClearVesselStateConfiguration(GenericActionConfiguration):
+    """No configuration needed — clears all vessel state from Redis."""
+    pass

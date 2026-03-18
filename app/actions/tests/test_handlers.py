@@ -8,7 +8,7 @@ from app.actions.handlers import (
     parse_timestamp,
     action_pull_vessel_tracking,
     delete_vessel_from_earthranger,
-    action_get_vessel_state,
+    action_get_vessels_state,
     action_delete_vessel,
     action_clear_vessel_state,
     _process_track,
@@ -525,7 +525,7 @@ class TestActionPullVesselTracking:
             assert "subject_groups" not in payload
 
 
-class TestActionGetVesselState:
+class TestActionGetVesselsState:
 
     @pytest.mark.asyncio
     async def test_returns_known_vessels(self, mock_integration, mock_state_manager):
@@ -540,7 +540,7 @@ class TestActionGetVesselState:
 
         with patch("app.actions.handlers.IntegrationStateManager", return_value=mock_state_manager), \
              patch("app.services.activity_logger.publish_event", new_callable=AsyncMock):
-            result = await action_get_vessel_state(integration=mock_integration, action_config=config)
+            result = await action_get_vessels_state(integration=mock_integration, action_config=config)
 
         assert result["total"] == 2
         assert result["last_updated"] == "2026-03-18T10:00:00Z"
@@ -557,7 +557,7 @@ class TestActionGetVesselState:
 
         with patch("app.actions.handlers.IntegrationStateManager", return_value=mock_state_manager), \
              patch("app.services.activity_logger.publish_event", new_callable=AsyncMock):
-            result = await action_get_vessel_state(integration=mock_integration, action_config=config)
+            result = await action_get_vessels_state(integration=mock_integration, action_config=config)
 
         assert result["total"] == 0
         assert result["known_vessels"] == []

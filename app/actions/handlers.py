@@ -12,7 +12,7 @@ from gundi_client_v2 import GundiClient
 
 from app.actions.configurations import (
     PullVesselTrackingConfiguration,
-    GetVesselStateConfiguration,
+    GetVesselsStateConfiguration,
     DeleteVesselConfiguration,
     ClearVesselStateConfiguration,
 )
@@ -453,9 +453,9 @@ async def action_pull_vessel_tracking(
 
 
 @activity_logger()
-async def action_get_vessel_state(
+async def action_get_vessels_state(
     integration,
-    action_config: GetVesselStateConfiguration,
+    action_config: GetVesselsStateConfiguration,
 ) -> dict:
     state_manager = IntegrationStateManager()
     integration_id = str(integration.id)

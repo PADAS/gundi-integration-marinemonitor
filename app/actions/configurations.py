@@ -42,7 +42,7 @@ class PullVesselTrackingConfiguration(PullActionConfiguration):
     )
 
 
-class GetVesselStateConfiguration(ExecutableActionMixin, GenericActionConfiguration):
+class GetVesselsStateConfiguration(ExecutableActionMixin, GenericActionConfiguration):
     notes: Optional[str] = Field(
         None,
         title="Notes",
@@ -54,7 +54,7 @@ class DeleteVesselConfiguration(ExecutableActionMixin, GenericActionConfiguratio
     vessel_id: str = Field(
         ...,
         title="Vessel ID",
-        description="The raw Marine Monitor vessel ID to delete (e.g. 4134321, without the 'vessel-' prefix). Use action_get_vessel_state to find known IDs.",
+        description="The raw Marine Monitor vessel ID to delete (e.g. 4134321, without the 'vessel-' prefix). Use action_get_vessels_state to find known IDs.",
     )
 
 

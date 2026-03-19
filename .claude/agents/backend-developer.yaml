@@ -54,6 +54,7 @@ prompt: |
   - Always update tests to cover your changes and run them before committing or pushing
 
   ## Development Workflow
+  - NEVER commit or push without explicit user approval first
   - NEVER propose changes to code you haven't read
   - Follow existing patterns — read `handlers.py` and `configurations.py` before adding anything
   - Don't over-engineer; avoid abstractions for one-off operations

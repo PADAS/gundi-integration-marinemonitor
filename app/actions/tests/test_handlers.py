@@ -7,7 +7,10 @@ from app.actions.handlers import (
     transform_track_to_observation,
     parse_timestamp,
     action_pull_vessel_tracking,
-    deactivate_subject_in_earthranger,
+    delete_vessel_from_earthranger,
+    action_get_vessels_state,
+    action_delete_vessel,
+    action_clear_vessel_state,
     _process_track,
 )
 from app.actions.tests.conftest import create_mock_client, patch_handler_dependencies
@@ -216,11 +219,11 @@ class TestParseTimestamp:
         assert result.tzinfo == timezone.utc
 
 
-class TestDeactivateSubjectInEarthRanger:
-    """Tests for deactivate_subject_in_earthranger function."""
+class TestDeleteVesselFromEarthRanger:
+    """Tests for delete_vessel_from_earthranger function."""
 
     @pytest.mark.asyncio
-    async def test_deactivate_subject_success(self):
+    async def test_delete_vessel_success(self):
         """Test successful subject and source deletion."""
         mock_client = MagicMock()
         mock_client.get_source_by_manufacturer_id = AsyncMock(
@@ -240,7 +243,7 @@ class TestDeactivateSubjectInEarthRanger:
         mock_client.__aexit__ = AsyncMock(return_value=None)
 
         with patch("app.actions.handlers.AsyncERClient", return_value=mock_client):
-            result = await deactivate_subject_in_earthranger(
+            result = await delete_vessel_from_earthranger(
                 track_id="48590736",
                 er_base_url="https://test.pamdas.org",
                 er_token="test-token",
@@ -248,32 +251,7 @@ class TestDeactivateSubjectInEarthRanger:
 
         assert result is True
         mock_client.delete_subject.assert_called_once_with("subject-uuid")
-        mock_client.delete_source.assert_called_once_with("source-uuid-123")
-
-    @pytest.mark.asyncio
-    async def test_deactivate_subject_with_cached_subject_id(self):
-        """Test that cached subject_id skips subjects lookup but still looks up source."""
-        mock_client = MagicMock()
-        mock_client.get_source_by_manufacturer_id = AsyncMock(
-            return_value={"data": {"id": "source-uuid-123"}}
-        )
-        mock_client.delete_subject = AsyncMock(return_value=None)
-        mock_client.delete_source = AsyncMock(return_value=None)
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=None)
-
-        with patch("app.actions.handlers.AsyncERClient", return_value=mock_client):
-            result = await deactivate_subject_in_earthranger(
-                track_id="48590736",
-                er_base_url="https://test.pamdas.org",
-                er_token="test-token",
-                subject_id="cached-subject-uuid",
-            )
-
-        assert result is True
-        mock_client.get_source_subjects.assert_not_called()
-        mock_client.delete_subject.assert_called_once_with("cached-subject-uuid")
-        mock_client.delete_source.assert_called_once_with("source-uuid-123")
+        mock_client.delete_source.assert_called_once_with("source-uuid-123", async_mode=True)
 
 
 class TestActionPullVesselTracking:
@@ -399,14 +377,14 @@ class TestActionPullVesselTracking:
         mock_marine_monitor_client,
         mock_state_manager,
     ):
-        """Test that stale subject handling (which manages state) is called after successful pull."""
+        """Test that stale vessel removal (which manages state) is called after successful pull."""
         with patch_handler_dependencies(mock_marine_monitor_client, mock_state_manager) as mocks:
             await action_pull_vessel_tracking(
                 integration=mock_integration,
                 action_config=mock_pull_config,
             )
 
-            mocks["handle_stale"].assert_called_once()
+            mocks["remove_stale"].assert_called_once()
 
     @pytest.mark.asyncio
     async def test_pull_vessel_tracking_always_deactivates(
@@ -415,7 +393,7 @@ class TestActionPullVesselTracking:
         mock_marine_monitor_client,
         mock_state_manager,
     ):
-        """Test that stale subject deactivation always runs."""
+        """Test that stale vessel removal always runs."""
         mock_config = MagicMock()
         mock_config.api_url = "https://test.example.com/api"
         mock_config.api_key.get_secret_value.return_value = "test-key"
@@ -430,7 +408,7 @@ class TestActionPullVesselTracking:
                 action_config=mock_config,
             )
 
-            mocks["handle_stale"].assert_called_once()
+            mocks["remove_stale"].assert_called_once()
 
     @pytest.mark.asyncio
     async def test_pull_vessel_tracking_filters_by_confidence(
@@ -545,3 +523,134 @@ class TestActionPullVesselTracking:
 
             payload = mocks["er_client"].post_sensor_observation.call_args[0][0]
             assert "subject_groups" not in payload
+
+
+class TestActionGetVesselsState:
+
+    @pytest.mark.asyncio
+    async def test_returns_known_vessels(self, mock_integration, mock_state_manager):
+        """Returns vessel list from Redis state."""
+        mock_state_manager.get_state = AsyncMock(side_effect=[
+            {"track_ids": ["vessel-111", "vessel-222"], "last_run": "2026-03-18T10:00:00Z"},  # known_vessels
+            {"last_seen": "2026-03-18T10:00:00Z"},  # vessel-111
+            {"last_seen": "2026-03-18T09:00:00Z"},  # vessel-222
+        ])
+        config = MagicMock()
+        config.notes = None
+
+        with patch("app.actions.handlers.IntegrationStateManager", return_value=mock_state_manager), \
+             patch("app.services.activity_logger.publish_event", new_callable=AsyncMock):
+            result = await action_get_vessels_state(integration=mock_integration, action_config=config)
+
+        assert result["total"] == 2
+        assert result["last_updated"] == "2026-03-18T10:00:00Z"
+        assert result["known_vessels"][0]["track_id"] == "vessel-111"
+        assert result["known_vessels"][0]["last_seen"] == "2026-03-18T10:00:00Z"
+        assert result["known_vessels"][1]["track_id"] == "vessel-222"
+
+    @pytest.mark.asyncio
+    async def test_returns_empty_when_no_state(self, mock_integration, mock_state_manager):
+        """Returns empty list when Redis has no known_vessels state."""
+        mock_state_manager.get_state = AsyncMock(return_value={})
+        config = MagicMock()
+        config.notes = None
+
+        with patch("app.actions.handlers.IntegrationStateManager", return_value=mock_state_manager), \
+             patch("app.services.activity_logger.publish_event", new_callable=AsyncMock):
+            result = await action_get_vessels_state(integration=mock_integration, action_config=config)
+
+        assert result["total"] == 0
+        assert result["known_vessels"] == []
+        assert result["last_updated"] is None
+
+
+class TestActionDeleteVessel:
+
+    @pytest.mark.asyncio
+    async def test_delete_vessel_success(self, mock_integration, mock_state_manager, mock_connection, mock_dest_integration):
+        """Successfully deletes vessel from ER and cleans up Redis."""
+        mock_state_manager.get_state = AsyncMock(return_value={
+            "track_ids": ["vessel-111", "vessel-222"],
+            "last_run": "2026-03-18T10:00:00Z",
+        })
+        config = MagicMock()
+        config.vessel_id = "111"
+        config.notes = None
+
+        mock_gundi_client = MagicMock()
+        mock_gundi_client.get_connection_details = AsyncMock(return_value=mock_connection)
+        mock_gundi_client.get_integration_details = AsyncMock(return_value=mock_dest_integration)
+        mock_gundi_client.__aenter__ = AsyncMock(return_value=mock_gundi_client)
+        mock_gundi_client.__aexit__ = AsyncMock(return_value=None)
+
+        with patch("app.actions.handlers.IntegrationStateManager", return_value=mock_state_manager), \
+             patch("app.actions.handlers.GundiClient", return_value=mock_gundi_client), \
+             patch("app.actions.handlers.delete_vessel_from_earthranger", new_callable=AsyncMock, return_value=True), \
+             patch("app.services.activity_logger.publish_event", new_callable=AsyncMock):
+            result = await action_delete_vessel(integration=mock_integration, action_config=config)
+
+        assert result["deleted"] is True
+        assert result["track_id"] == "vessel-111"
+        mock_state_manager.delete_state.assert_called_once()
+        mock_state_manager.set_state.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_delete_vessel_failure_does_not_clean_redis(self, mock_integration, mock_state_manager, mock_connection, mock_dest_integration):
+        """When ER deletion fails, Redis state is not modified."""
+        mock_state_manager.get_state = AsyncMock(return_value={
+            "track_ids": ["vessel-111"],
+            "last_run": "2026-03-18T10:00:00Z",
+        })
+        config = MagicMock()
+        config.vessel_id = "111"
+        config.notes = None
+
+        mock_gundi_client = MagicMock()
+        mock_gundi_client.get_connection_details = AsyncMock(return_value=mock_connection)
+        mock_gundi_client.get_integration_details = AsyncMock(return_value=mock_dest_integration)
+        mock_gundi_client.__aenter__ = AsyncMock(return_value=mock_gundi_client)
+        mock_gundi_client.__aexit__ = AsyncMock(return_value=None)
+
+        with patch("app.actions.handlers.IntegrationStateManager", return_value=mock_state_manager), \
+             patch("app.actions.handlers.GundiClient", return_value=mock_gundi_client), \
+             patch("app.actions.handlers.delete_vessel_from_earthranger", new_callable=AsyncMock, return_value=False), \
+             patch("app.services.activity_logger.publish_event", new_callable=AsyncMock):
+            result = await action_delete_vessel(integration=mock_integration, action_config=config)
+
+        assert result["deleted"] is False
+        mock_state_manager.delete_state.assert_not_called()
+        mock_state_manager.set_state.assert_not_called()
+
+
+class TestActionClearVesselState:
+
+    @pytest.mark.asyncio
+    async def test_clears_all_vessel_state(self, mock_integration, mock_state_manager):
+        """Deletes all per-vessel keys and known_vessels index from Redis."""
+        mock_state_manager.get_state = AsyncMock(return_value={
+            "track_ids": ["vessel-111", "vessel-222"],
+            "last_run": "2026-03-18T10:00:00Z",
+        })
+        config = MagicMock()
+        config.notes = None
+
+        with patch("app.actions.handlers.IntegrationStateManager", return_value=mock_state_manager), \
+             patch("app.services.activity_logger.publish_event", new_callable=AsyncMock):
+            result = await action_clear_vessel_state(integration=mock_integration, action_config=config)
+
+        assert result["vessels_cleared"] == 2
+        assert mock_state_manager.delete_state.call_count == 3  # 2 vessels + known_vessels index
+
+    @pytest.mark.asyncio
+    async def test_clears_empty_state(self, mock_integration, mock_state_manager):
+        """Handles empty Redis state gracefully."""
+        mock_state_manager.get_state = AsyncMock(return_value={})
+        config = MagicMock()
+        config.notes = None
+
+        with patch("app.actions.handlers.IntegrationStateManager", return_value=mock_state_manager), \
+             patch("app.services.activity_logger.publish_event", new_callable=AsyncMock):
+            result = await action_clear_vessel_state(integration=mock_integration, action_config=config)
+
+        assert result["vessels_cleared"] == 0
+        assert mock_state_manager.delete_state.call_count == 1  # only known_vessels index

@@ -10,7 +10,12 @@ from erclient import AsyncERClient
 from erclient.er_errors import ERClientNotFound, ERClientPermissionDenied, ERClientBadCredentials
 from gundi_client_v2 import GundiClient
 
-from app.actions.configurations import PullVesselTrackingConfiguration
+from app.actions.configurations import (
+    PullVesselTrackingConfiguration,
+    GetVesselsStateConfiguration,
+    DeleteVesselConfiguration,
+    ClearVesselStateConfiguration,
+)
 from app.actions.marine_monitor import MarineMonitorClient
 from app.services.action_scheduler import crontab_schedule
 from app.services.activity_logger import activity_logger, log_action_activity
@@ -29,28 +34,23 @@ def get_position_date(subject):
         return datetime.min.replace(tzinfo=timezone.utc)
 
 
-async def deactivate_subject_in_earthranger(
+async def delete_vessel_from_earthranger(
     track_id: str,
     er_base_url: str,
     er_token: str,
-    subject_id: str | None = None,
 ) -> bool:
     """Delete a stale vessel subject and its source from EarthRanger.
-
-    Always looks up the source by manufacturer_id (needed for source deletion).
-    If subject_id is provided, skips the subjects lookup.
 
     WARNING: Irreversible — deleted subjects and sources lose all observation history.
 
     1. Gets the source by manufacturer_id (track_id)
-    2. If no subject_id: gets all subjects linked to the source, picks most recent
+    2. Gets all subjects linked to the source, picks most recent
     3. Deletes the subject
-    4. Deletes the source
+    4. Deletes the source (async)
 
-    :param track_id: The track ID used as manufacturer_id in ER
+    :param track_id: The vessel ID used as manufacturer_id in ER
     :param er_base_url: The EarthRanger base URL
     :param er_token: The EarthRanger auth token
-    :param subject_id: Optional cached subject UUID — skips subjects lookup if provided
     :return: True if deletion was successful, False otherwise
     """
     try:
@@ -58,7 +58,6 @@ async def deactivate_subject_in_earthranger(
             service_root=f"{er_base_url}/api/v1.0",
             token=er_token,
         ) as client:
-            # Always look up source — needed for source deletion
             try:
                 source_response = await client.get_source_by_manufacturer_id(track_id)
                 source = source_response.get("data", source_response)
@@ -73,22 +72,21 @@ async def deactivate_subject_in_earthranger(
                 logger.warning(f"Source response missing 'id' for track_id '{track_id}'")
                 return False
 
+            subjects = await client.get_source_subjects(source_id)
+            if not subjects:
+                logger.info(f"No subjects found for vessel '{track_id}', skipping deletion")
+                return False
+
+            subject_to_delete = max(subjects, key=get_position_date)
+            subject_id = subject_to_delete.get("id")
+
             if not subject_id:
-                subjects = await client.get_source_subjects(source_id)
-                if not subjects:
-                    logger.info(f"No subjects found for source '{source_id}', nothing to delete")
-                    return False
-
-                subject_to_delete = max(subjects, key=get_position_date)
-                subject_id = subject_to_delete.get("id")
-
-                if not subject_id:
-                    logger.warning("Subject missing 'id' field")
-                    return False
+                logger.warning("Subject missing 'id' field")
+                return False
 
             await client.delete_subject(subject_id)
-            await client.delete_source(source_id)
-            logger.info(f"Deleted subject '{subject_id}' and source '{source_id}' for track '{track_id}'")
+            await client.delete_source(source_id, async_mode=True)
+            logger.info(f"Requested deletion of vessel '{track_id}' from EarthRanger (subject: {subject_id}, source: {source_id})")
             return True
 
     except Exception as e:
@@ -216,70 +214,73 @@ def _process_track(
     return transform_track_to_observation(track, radar_station)
 
 
-async def _handle_stale_subjects(
+async def _get_stale_vessel_ids(
     state_manager: IntegrationStateManager,
     integration_id: str,
-    er_base_url: str,
-    er_token: str,
     active_track_ids: set[str],
-    now: datetime,
-) -> int:
-    """Handle deactivation of stale subjects and update state.
+) -> set[str]:
+    """Return vessel IDs known from the last run that are no longer active.
 
-    Compares currently active tracks with stored state. Deactivates subjects
-    for tracks that are no longer appearing in the API.
-
-    Returns the number of subjects deactivated.
-    """
-    deactivated_count = 0
-
-    # Get track index to find known track IDs
     # ToDo: Use state manager Groups (redis set) as in the ATS integration, once available in the template repo
-    index_state = await state_manager.get_state(
+    """
+    known_vessels_state = await state_manager.get_state(
         integration_id=integration_id,
         action_id="pull_vessel_tracking",
-        source_id="track_index",
+        source_id="known_vessels",
     )
-    known_track_ids = set(index_state.get("track_ids", []))
+    known_vessel_ids = set(known_vessels_state.get("track_ids", []))
+    return known_vessel_ids - active_track_ids
 
-    # Find stale tracks (known but not currently active)
-    stale_track_ids = known_track_ids - active_track_ids
 
-    # Deactivate subjects for stale tracks
-    for track_id in stale_track_ids:
-        logger.info(f"Track '{track_id}' is stale, attempting to deactivate subject")
+async def _delete_stale_vessels_from_er(
+    stale_vessel_ids: set[str],
+    er_base_url: str,
+    er_token: str,
+) -> list[str]:
+    """Delete stale vessels from a single EarthRanger destination.
 
-        track_state = await state_manager.get_state(
+    Returns the list of track_ids successfully deleted.
+    """
+    deleted_track_ids: list[str] = []
+    for track_id in stale_vessel_ids:
+        logger.info(f"Vessel '{track_id}' is stale, removing from EarthRanger at {er_base_url}")
+        deleted = await delete_vessel_from_earthranger(
+            track_id=track_id,
+            er_base_url=er_base_url,
+            er_token=er_token,
+        )
+        if deleted:
+            deleted_track_ids.append(track_id)
+            logger.info(f"Requested deletion of vessel '{track_id}' from EarthRanger and removed from Redis")
+    return deleted_track_ids
+
+
+async def _update_vessel_state(
+    state_manager: IntegrationStateManager,
+    integration_id: str,
+    active_track_ids: set[str],
+    deleted_track_ids: list[str],
+    now: datetime,
+) -> None:
+    """Update Redis state after all ER deletions are done.
+
+    Removes per-vessel keys for deleted vessels, updates known_vessels index,
+    and refreshes last_seen for all active vessels.
+    """
+    for track_id in deleted_track_ids:
+        await state_manager.delete_state(
             integration_id=integration_id,
             action_id="pull_vessel_tracking",
             source_id=track_id,
         )
-        deactivated = await deactivate_subject_in_earthranger(
-            track_id=track_id,
-            er_base_url=er_base_url,
-            er_token=er_token,
-            subject_id=track_state.get("subject_id"),
-        )
 
-        if deactivated:
-            deactivated_count += 1
-            # Delete the track's state key
-            await state_manager.delete_state(
-                integration_id=integration_id,
-                action_id="pull_vessel_tracking",
-                source_id=track_id,
-            )
-            logger.info(f"Deleted subject/source for stale track '{track_id}' and removed from state")
-
-    # Update track index with currently active tracks
     await state_manager.set_state(
         integration_id=integration_id,
         action_id="pull_vessel_tracking",
         state={"track_ids": list(active_track_ids), "last_run": now.isoformat()},
-        source_id="track_index",
+        source_id="known_vessels",
     )
 
-    # Store individual state for each active track, preserving existing fields (e.g. subject_id)
     for track_id in active_track_ids:
         existing = await state_manager.get_state(
             integration_id=integration_id,
@@ -292,8 +293,6 @@ async def _handle_stale_subjects(
             state={**existing, "last_seen": now.isoformat()},
             source_id=track_id,
         )
-
-    return deactivated_count
 
 
 
@@ -325,7 +324,7 @@ async def action_pull_vessel_tracking(
 
     Fetches radar station data with vessel tracks and transforms them to
     Gundi observations. Uses state management to track which observations
-    have been processed. Optionally deactivates stale subjects in EarthRanger.
+    have been processed. Optionally deletes stale vessels from EarthRanger.
     """
     state_manager = IntegrationStateManager()
     integration_id = str(integration.id)
@@ -334,7 +333,7 @@ async def action_pull_vessel_tracking(
         "observations_extracted": 0,
         "radar_stations_processed": 0,
         "tracks_processed": 0,
-        "subjects_deactivated": 0,
+        "vessels_deleted": 0,
         "radar_stations_failed": 0,
     }
 
@@ -374,7 +373,13 @@ async def action_pull_vessel_tracking(
                 with attempt:
                     connection = await gundi.get_connection_details(integration_id)
         if not connection.destinations:
-            logger.warning(f"No destinations configured for integration '{integration_id}', skipping subject deactivation and group assignment")
+            logger.warning(f"No destinations configured for integration '{integration_id}', skipping vessel deletion and group assignment")
+
+        # Compute stale IDs once before iterating destinations so all destinations
+        # see the same stale set regardless of Redis updates during the loop
+        stale_vessel_ids = await _get_stale_vessel_ids(state_manager, integration_id, active_track_ids)
+        all_deleted_track_ids: list[str] = []
+
         for destination in (connection.destinations or []):
             dest_base_url = destination.base_url
             async with GundiClient() as gundi:
@@ -391,6 +396,7 @@ async def action_pull_vessel_tracking(
                 continue
 
             if all_observations:
+                logger.info(f"Sending {len(all_observations)} vessel observations to EarthRanger at {dest_base_url}")
                 await log_action_activity(
                     integration_id=integration_id,
                     action_id="pull_vessel_tracking",
@@ -408,22 +414,162 @@ async def action_pull_vessel_tracking(
                 results["observations_extracted"] = len(all_observations)
                 logger.info(f"Sent {len(all_observations)} observations to EarthRanger at {dest_base_url}")
 
-            results["subjects_deactivated"] += await _handle_stale_subjects(
-                state_manager=state_manager,
-                integration_id=integration_id,
+            deleted = await _delete_stale_vessels_from_er(
+                stale_vessel_ids=stale_vessel_ids,
                 er_base_url=dest_base_url,
                 er_token=dest_token,
-                active_track_ids=active_track_ids,
-                now=now,
             )
+            # Accumulate unique deleted IDs across all destinations
+            all_deleted_track_ids = list(set(all_deleted_track_ids) | set(deleted))
+
+        # Update Redis once after all destinations have been processed
+        await _update_vessel_state(
+            state_manager=state_manager,
+            integration_id=integration_id,
+            active_track_ids=active_track_ids,
+            deleted_track_ids=all_deleted_track_ids,
+            now=now,
+        )
+        if all_deleted_track_ids:
+            await log_action_activity(
+                integration_id=integration_id,
+                action_id="pull_vessel_tracking",
+                title=f"Removed {len(all_deleted_track_ids)} stale vessels from EarthRanger",
+                level=logging.INFO,
+                data={"removed_vessels": all_deleted_track_ids},
+            )
+        results["vessels_deleted"] = len(all_deleted_track_ids)
 
     updated_vessels = list({o["subject_name"] for o in all_observations})
     await log_action_activity(
         integration_id=integration_id,
         action_id="pull_vessel_tracking",
-        title=f"Finished: {results['observations_extracted']} observations sent, {results['subjects_deactivated']} stale vessels removed",
+        title=f"Finished: {results['observations_extracted']} observations sent, {results['vessels_deleted']} stale vessels removed",
         level=logging.INFO,
         data={"updated_vessels": updated_vessels},
     )
 
     return results
+
+
+@activity_logger()
+async def action_get_vessels_state(
+    integration,
+    action_config: GetVesselsStateConfiguration,
+) -> dict:
+    state_manager = IntegrationStateManager()
+    integration_id = str(integration.id)
+
+    known_vessels_state = await state_manager.get_state(
+        integration_id=integration_id,
+        action_id="pull_vessel_tracking",
+        source_id="known_vessels",
+    )
+    track_ids = known_vessels_state.get("track_ids", [])
+
+    vessels = []
+    for track_id in track_ids:
+        vessel_state = await state_manager.get_state(
+            integration_id=integration_id,
+            action_id="pull_vessel_tracking",
+            source_id=track_id,
+        )
+        vessels.append({
+            "track_id": track_id,
+            "last_seen": vessel_state.get("last_seen"),
+        })
+
+    return {
+        "total": len(vessels),
+        "last_updated": known_vessels_state.get("last_run"),
+        "known_vessels": vessels,
+    }
+
+
+@activity_logger()
+async def action_delete_vessel(
+    integration,
+    action_config: DeleteVesselConfiguration,
+) -> dict:
+    state_manager = IntegrationStateManager()
+    integration_id = str(integration.id)
+    track_id = f"vessel-{action_config.vessel_id}"
+
+    deleted = False
+    async with GundiClient() as gundi:
+        async for attempt in stamina.retry_context(on=httpx.HTTPError, wait_initial=1.0, wait_jitter=5.0, wait_max=32.0):
+            with attempt:
+                connection = await gundi.get_connection_details(integration_id)
+
+    for destination in (connection.destinations or []):
+        dest_base_url = destination.base_url
+        async with GundiClient() as gundi:
+            async for attempt in stamina.retry_context(on=httpx.HTTPError, wait_initial=1.0, wait_jitter=5.0, wait_max=32.0):
+                with attempt:
+                    dest_integration = await gundi.get_integration_details(str(destination.id))
+        auth_config = dest_integration.get_action_config("auth")
+        if not auth_config or not dest_base_url:
+            logger.warning(f"Destination {destination.id} missing base_url or auth config, skipping")
+            continue
+        dest_token = auth_config.data.get("token")
+        if not dest_token:
+            logger.warning(f"Destination {destination.id} auth config missing token, skipping")
+            continue
+
+        deleted = deleted or await delete_vessel_from_earthranger(
+            track_id=track_id,
+            er_base_url=dest_base_url,
+            er_token=dest_token,
+        )
+
+    if deleted:
+        await state_manager.delete_state(
+            integration_id=integration_id,
+            action_id="pull_vessel_tracking",
+            source_id=track_id,
+        )
+        known_vessels_state = await state_manager.get_state(
+            integration_id=integration_id,
+            action_id="pull_vessel_tracking",
+            source_id="known_vessels",
+        )
+        updated_ids = [t for t in known_vessels_state.get("track_ids", []) if t != track_id]
+        await state_manager.set_state(
+            integration_id=integration_id,
+            action_id="pull_vessel_tracking",
+            state={**known_vessels_state, "track_ids": updated_ids},
+            source_id="known_vessels",
+        )
+
+    return {"track_id": track_id, "deleted": deleted}
+
+
+@activity_logger()
+async def action_clear_vessel_state(
+    integration,
+    action_config: ClearVesselStateConfiguration,
+) -> dict:
+    state_manager = IntegrationStateManager()
+    integration_id = str(integration.id)
+
+    known_vessels_state = await state_manager.get_state(
+        integration_id=integration_id,
+        action_id="pull_vessel_tracking",
+        source_id="known_vessels",
+    )
+    track_ids = known_vessels_state.get("track_ids", [])
+
+    for track_id in track_ids:
+        await state_manager.delete_state(
+            integration_id=integration_id,
+            action_id="pull_vessel_tracking",
+            source_id=track_id,
+        )
+
+    await state_manager.delete_state(
+        integration_id=integration_id,
+        action_id="pull_vessel_tracking",
+        source_id="known_vessels",
+    )
+
+    return {"vessels_cleared": len(track_ids)}

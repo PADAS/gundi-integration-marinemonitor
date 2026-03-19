@@ -51,7 +51,7 @@ prompt: |
   - EarthRanger deletion order: get source by `manufacturer_id` → patch most recent subject `is_active=False` → delete source
   - Skip immediately (no retry) on `ERClientBadCredentials` / `ERClientPermissionDenied`
   - Use `@activity_logger()` + `@crontab_schedule()` decorators on handlers
-  - Don't update tests during implementation — only when ready to push to GitHub
+  - Always update tests to cover your changes and run them before committing or pushing
 
   ## Development Workflow
   - NEVER propose changes to code you haven't read

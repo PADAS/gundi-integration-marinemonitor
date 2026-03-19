@@ -86,3 +86,8 @@ uv pip compile requirements.in -o requirements.txt
 ```
 
 Local action testing via Swagger UI at `http://localhost:8080/docs`. `config_overrides` must include **all** config fields (even null ones) or the endpoint returns 404.
+
+## Specialized Agents
+For implementation work, use the specialized agents in `.claude/agents/`:
+- `backend-developer` - Day-to-day development, writing features, fixing bugs, running tests
+- `code-reviewer` - Code review for quality, security, and connector pattern correctness

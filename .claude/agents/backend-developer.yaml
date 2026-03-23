@@ -39,11 +39,10 @@ prompt: |
 
   ## Actions Overview
   - `action_pull_vessel_tracking` — main pull, every 5 min
-  - `action_get_vessels_state` — debug: inspect Redis state
-  - `action_delete_vessel` — debug: delete specific vessel from ER + state
-  - `action_clear_vessel_state` — debug: wipe all vessel state
+  - `action_view_cached_vessel_data` — debug: inspect Redis state
+  - `action_reset_cached_vessel_data` — debug: wipe all vessel state
 
-  Debug actions need `ExecutableActionMixin` + a dummy `notes: Optional[str]` field for portal visibility.
+  Debug actions need `ExecutableActionMixin` for portal visibility.
 
   ## Coding Conventions
   - Use `Optional[str]` (not `str | None`) — pydantic v1 style

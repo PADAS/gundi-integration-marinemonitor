@@ -12,9 +12,8 @@ from gundi_client_v2 import GundiClient
 
 from app.actions.configurations import (
     PullVesselTrackingConfiguration,
-    GetVesselsStateConfiguration,
-    DeleteVesselConfiguration,
-    ClearVesselStateConfiguration,
+    ViewCachedVesselDataConfiguration,
+    ResetCachedVesselDataConfiguration,
 )
 from app.actions.marine_monitor import MarineMonitorClient
 from app.services.action_scheduler import crontab_schedule
@@ -301,7 +300,7 @@ def _is_permanent_er_error(e: Exception) -> bool:
 
 
 @backoff.on_exception(backoff.expo, Exception, max_tries=5, jitter=backoff.full_jitter, giveup=_is_permanent_er_error)
-async def _post_observation_to_er(client: AsyncERClient, observation: dict, subject_group_name: Optional[str] = None) -> None:
+async def _post_observation_to_er(client: AsyncERClient, observation: dict, subject_group_name: Optional[str] = None, subject_subtype_id: Optional[str] = None) -> None:
     payload = {
         "manufacturer_id": observation["source"],
         "subject_name": observation["subject_name"],
@@ -311,6 +310,8 @@ async def _post_observation_to_er(client: AsyncERClient, observation: dict, subj
     }
     if subject_group_name:
         payload["subject_groups"] = [subject_group_name]
+    if subject_subtype_id:
+        payload["subject_subtype"] = subject_subtype_id
     await client.post_sensor_observation(payload)
 
 
@@ -410,7 +411,7 @@ async def action_pull_vessel_tracking(
                     provider_key=f"gundi_marine_monitor_{integration_id}",
                 ) as er_client:
                     for observation in all_observations:
-                        await _post_observation_to_er(er_client, observation, action_config.earthranger_subject_group_name)
+                        await _post_observation_to_er(er_client, observation, action_config.earthranger_subject_group_name, action_config.earthranger_subject_subtype_id)
                 results["observations_extracted"] = len(all_observations)
                 logger.info(f"Sent {len(all_observations)} observations to EarthRanger at {dest_base_url}")
 
@@ -453,9 +454,9 @@ async def action_pull_vessel_tracking(
 
 
 @activity_logger()
-async def action_get_vessels_state(
+async def action_view_cached_vessel_data(
     integration,
-    action_config: GetVesselsStateConfiguration,
+    action_config: ViewCachedVesselDataConfiguration,
 ) -> dict:
     state_manager = IntegrationStateManager()
     integration_id = str(integration.id)
@@ -486,68 +487,11 @@ async def action_get_vessels_state(
     }
 
 
-@activity_logger()
-async def action_delete_vessel(
-    integration,
-    action_config: DeleteVesselConfiguration,
-) -> dict:
-    state_manager = IntegrationStateManager()
-    integration_id = str(integration.id)
-    track_id = f"vessel-{action_config.vessel_id}"
-
-    deleted = False
-    async with GundiClient() as gundi:
-        async for attempt in stamina.retry_context(on=httpx.HTTPError, wait_initial=1.0, wait_jitter=5.0, wait_max=32.0):
-            with attempt:
-                connection = await gundi.get_connection_details(integration_id)
-
-    for destination in (connection.destinations or []):
-        dest_base_url = destination.base_url
-        async with GundiClient() as gundi:
-            async for attempt in stamina.retry_context(on=httpx.HTTPError, wait_initial=1.0, wait_jitter=5.0, wait_max=32.0):
-                with attempt:
-                    dest_integration = await gundi.get_integration_details(str(destination.id))
-        auth_config = dest_integration.get_action_config("auth")
-        if not auth_config or not dest_base_url:
-            logger.warning(f"Destination {destination.id} missing base_url or auth config, skipping")
-            continue
-        dest_token = auth_config.data.get("token")
-        if not dest_token:
-            logger.warning(f"Destination {destination.id} auth config missing token, skipping")
-            continue
-
-        deleted = deleted or await delete_vessel_from_earthranger(
-            track_id=track_id,
-            er_base_url=dest_base_url,
-            er_token=dest_token,
-        )
-
-    if deleted:
-        await state_manager.delete_state(
-            integration_id=integration_id,
-            action_id="pull_vessel_tracking",
-            source_id=track_id,
-        )
-        known_vessels_state = await state_manager.get_state(
-            integration_id=integration_id,
-            action_id="pull_vessel_tracking",
-            source_id="known_vessels",
-        )
-        updated_ids = [t for t in known_vessels_state.get("track_ids", []) if t != track_id]
-        await state_manager.set_state(
-            integration_id=integration_id,
-            action_id="pull_vessel_tracking",
-            state={**known_vessels_state, "track_ids": updated_ids},
-            source_id="known_vessels",
-        )
-
-    return {"track_id": track_id, "deleted": deleted}
-
 
 @activity_logger()
-async def action_clear_vessel_state(
+async def action_reset_cached_vessel_data(
     integration,
-    action_config: ClearVesselStateConfiguration,
+    action_config: ResetCachedVesselDataConfiguration,
 ) -> dict:
     state_manager = IntegrationStateManager()
     integration_id = str(integration.id)

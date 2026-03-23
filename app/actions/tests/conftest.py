@@ -21,7 +21,7 @@ def mock_pull_config():
     config.api_key.get_secret_value.return_value = "test-api-key"
     config.minimal_confidence = 0.1
     config.earthranger_subject_group_name = "Marine Monitor"
-    config.earthranger_subject_subtype_id = "boat"
+    config.earthranger_subject_subtype_id = None
     return config
 
 

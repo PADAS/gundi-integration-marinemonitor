@@ -30,10 +30,10 @@ class PullVesselTrackingConfiguration(PullActionConfiguration):
         description="Name of the EarthRanger subject group to assign vessel subjects to. The group will be created if it does not exist.",
     )
 
-    earthranger_subject_subtype_id: str = Field(
-        default="boat",
+    earthranger_subject_subtype_id: Optional[str] = Field(
+        default=None,
         title="EarthRanger Subject Subtype",
-        description="EarthRanger subject subtype ID to assign to vessel subjects (e.g. 'boat', 'car').",
+        description="Optional EarthRanger subject subtype ID to assign to vessel subjects (e.g. 'boat', 'car'). If not set, no subtype will be sent.",
     )
 
     minimal_confidence: float = Field(

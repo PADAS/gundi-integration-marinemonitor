@@ -31,7 +31,7 @@ class PullVesselTrackingConfiguration(PullActionConfiguration):
     )
 
     earthranger_subject_subtype_id: Optional[str] = Field(
-        default=None,
+        default="boat",
         title="EarthRanger Subject Subtype",
         description="Optional EarthRanger subject subtype ID to assign to vessel subjects (e.g. 'boat', 'car'). If not set, no subtype will be sent.",
     )

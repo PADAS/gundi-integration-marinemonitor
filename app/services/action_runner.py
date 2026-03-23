@@ -112,7 +112,8 @@ async def execute_action(
 
     # Get the configuration needed to execute the action
     action_config = await config_manager.get_action_configuration(integration_id, action_id)
-    if not action_config and not config_overrides:
+    config_has_required_fields = bool(config_model.__fields__)
+    if not action_config and not config_overrides and config_has_required_fields:
         message = f"Configuration for action '{action_id}' for integration {str(integration.id)} is missing."
         logger.error(message)
         return await _handle_error(

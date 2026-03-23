@@ -54,9 +54,8 @@ app/
 
 | Action | Key config field | Purpose |
 |--------|-----------------|---------|
-| `action_get_vessels_state` | — | Inspect Redis vessel state |
-| `action_delete_vessel` | `vessel_id` (required) | Delete a specific vessel from ER + state |
-| `action_clear_vessel_state` | — | Wipe all vessel state from Redis |
+| `action_view_cached_vessel_data` | — | Inspect Redis vessel state |
+| `action_reset_cached_vessel_data` | — | Wipe all vessel state from Redis |
 
 ## Conventions
 - Use `Optional[str]` (not `str | None`) — pydantic v1 style

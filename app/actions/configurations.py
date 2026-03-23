@@ -30,6 +30,12 @@ class PullVesselTrackingConfiguration(PullActionConfiguration):
         description="Name of the EarthRanger subject group to assign vessel subjects to. The group will be created if it does not exist.",
     )
 
+    earthranger_subject_subtype_id: str = Field(
+        default="boat",
+        title="EarthRanger Subject Subtype",
+        description="EarthRanger subject subtype ID to assign to vessel subjects (e.g. 'boat', 'car').",
+    )
+
     minimal_confidence: float = Field(
         default=0.1,
         title="Minimal Confidence",
@@ -42,25 +48,15 @@ class PullVesselTrackingConfiguration(PullActionConfiguration):
     )
 
 
-class GetVesselsStateConfiguration(ExecutableActionMixin, GenericActionConfiguration):
-    notes: Optional[str] = Field(
-        None,
-        title="Notes",
-        description="Optional notes (not used). Returns current vessel state from Redis.",
-    )
+class ViewCachedVesselDataConfiguration(ExecutableActionMixin, GenericActionConfiguration):
+
+    @classmethod
+    def ui_schema(cls, *args, **kwargs):
+        return {"ui:description": "Show the cached vessel data"}
 
 
-class DeleteVesselConfiguration(ExecutableActionMixin, GenericActionConfiguration):
-    vessel_id: str = Field(
-        ...,
-        title="Vessel ID",
-        description="The raw Marine Monitor vessel ID to delete (e.g. 4134321, without the 'vessel-' prefix). Use action_get_vessels_state to find known IDs.",
-    )
+class ResetCachedVesselDataConfiguration(ExecutableActionMixin, GenericActionConfiguration):
 
-
-class ClearVesselStateConfiguration(ExecutableActionMixin, GenericActionConfiguration):
-    notes: Optional[str] = Field(
-        None,
-        title="Notes",
-        description="Optional notes (not used). Clears all vessel state from Redis.",
-    )
+    @classmethod
+    def ui_schema(cls, *args, **kwargs):
+        return {"ui:description": "Reset the synchronization data for this connection's vessels"}

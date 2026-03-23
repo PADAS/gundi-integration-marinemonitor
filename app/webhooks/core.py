@@ -1,7 +1,7 @@
 import importlib
 import inspect
 import json
-from typing import Optional, Union
+from typing import Dict, Optional, Union
 from pydantic import BaseModel
 from fastapi.encoders import jsonable_encoder
 from app.services.utils import StructHexString, UISchemaModelMixin, FieldWithUIOptions, UIOptions
@@ -58,7 +58,7 @@ class WebhookPayload(BaseModel):
 
 
 class HexStringPayload(WebhookPayload):
-    hex_format: Optional[dict]
+    hex_format: Optional[Dict]
     hex_data_field: Optional[str]
 
     def dict(

@@ -8,9 +8,8 @@ from app.actions.handlers import (
     parse_timestamp,
     action_pull_vessel_tracking,
     delete_vessel_from_earthranger,
-    action_get_vessels_state,
-    action_delete_vessel,
-    action_clear_vessel_state,
+    action_view_cached_vessel_data,
+    action_reset_cached_vessel_data,
     _process_track,
 )
 from app.actions.tests.conftest import create_mock_client, patch_handler_dependencies
@@ -525,7 +524,7 @@ class TestActionPullVesselTracking:
             assert "subject_groups" not in payload
 
 
-class TestActionGetVesselsState:
+class TestActionViewCachedVesselData:
 
     @pytest.mark.asyncio
     async def test_returns_known_vessels(self, mock_integration, mock_state_manager):
@@ -540,7 +539,7 @@ class TestActionGetVesselsState:
 
         with patch("app.actions.handlers.IntegrationStateManager", return_value=mock_state_manager), \
              patch("app.services.activity_logger.publish_event", new_callable=AsyncMock):
-            result = await action_get_vessels_state(integration=mock_integration, action_config=config)
+            result = await action_view_cached_vessel_data(integration=mock_integration, action_config=config)
 
         assert result["total"] == 2
         assert result["last_updated"] == "2026-03-18T10:00:00Z"
@@ -557,72 +556,15 @@ class TestActionGetVesselsState:
 
         with patch("app.actions.handlers.IntegrationStateManager", return_value=mock_state_manager), \
              patch("app.services.activity_logger.publish_event", new_callable=AsyncMock):
-            result = await action_get_vessels_state(integration=mock_integration, action_config=config)
+            result = await action_view_cached_vessel_data(integration=mock_integration, action_config=config)
 
         assert result["total"] == 0
         assert result["known_vessels"] == []
         assert result["last_updated"] is None
 
 
-class TestActionDeleteVessel:
 
-    @pytest.mark.asyncio
-    async def test_delete_vessel_success(self, mock_integration, mock_state_manager, mock_connection, mock_dest_integration):
-        """Successfully deletes vessel from ER and cleans up Redis."""
-        mock_state_manager.get_state = AsyncMock(return_value={
-            "track_ids": ["vessel-111", "vessel-222"],
-            "last_run": "2026-03-18T10:00:00Z",
-        })
-        config = MagicMock()
-        config.vessel_id = "111"
-        config.notes = None
-
-        mock_gundi_client = MagicMock()
-        mock_gundi_client.get_connection_details = AsyncMock(return_value=mock_connection)
-        mock_gundi_client.get_integration_details = AsyncMock(return_value=mock_dest_integration)
-        mock_gundi_client.__aenter__ = AsyncMock(return_value=mock_gundi_client)
-        mock_gundi_client.__aexit__ = AsyncMock(return_value=None)
-
-        with patch("app.actions.handlers.IntegrationStateManager", return_value=mock_state_manager), \
-             patch("app.actions.handlers.GundiClient", return_value=mock_gundi_client), \
-             patch("app.actions.handlers.delete_vessel_from_earthranger", new_callable=AsyncMock, return_value=True), \
-             patch("app.services.activity_logger.publish_event", new_callable=AsyncMock):
-            result = await action_delete_vessel(integration=mock_integration, action_config=config)
-
-        assert result["deleted"] is True
-        assert result["track_id"] == "vessel-111"
-        mock_state_manager.delete_state.assert_called_once()
-        mock_state_manager.set_state.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_delete_vessel_failure_does_not_clean_redis(self, mock_integration, mock_state_manager, mock_connection, mock_dest_integration):
-        """When ER deletion fails, Redis state is not modified."""
-        mock_state_manager.get_state = AsyncMock(return_value={
-            "track_ids": ["vessel-111"],
-            "last_run": "2026-03-18T10:00:00Z",
-        })
-        config = MagicMock()
-        config.vessel_id = "111"
-        config.notes = None
-
-        mock_gundi_client = MagicMock()
-        mock_gundi_client.get_connection_details = AsyncMock(return_value=mock_connection)
-        mock_gundi_client.get_integration_details = AsyncMock(return_value=mock_dest_integration)
-        mock_gundi_client.__aenter__ = AsyncMock(return_value=mock_gundi_client)
-        mock_gundi_client.__aexit__ = AsyncMock(return_value=None)
-
-        with patch("app.actions.handlers.IntegrationStateManager", return_value=mock_state_manager), \
-             patch("app.actions.handlers.GundiClient", return_value=mock_gundi_client), \
-             patch("app.actions.handlers.delete_vessel_from_earthranger", new_callable=AsyncMock, return_value=False), \
-             patch("app.services.activity_logger.publish_event", new_callable=AsyncMock):
-            result = await action_delete_vessel(integration=mock_integration, action_config=config)
-
-        assert result["deleted"] is False
-        mock_state_manager.delete_state.assert_not_called()
-        mock_state_manager.set_state.assert_not_called()
-
-
-class TestActionClearVesselState:
+class TestActionResetCachedVesselData:
 
     @pytest.mark.asyncio
     async def test_clears_all_vessel_state(self, mock_integration, mock_state_manager):
@@ -636,7 +578,7 @@ class TestActionClearVesselState:
 
         with patch("app.actions.handlers.IntegrationStateManager", return_value=mock_state_manager), \
              patch("app.services.activity_logger.publish_event", new_callable=AsyncMock):
-            result = await action_clear_vessel_state(integration=mock_integration, action_config=config)
+            result = await action_reset_cached_vessel_data(integration=mock_integration, action_config=config)
 
         assert result["vessels_cleared"] == 2
         assert mock_state_manager.delete_state.call_count == 3  # 2 vessels + known_vessels index
@@ -650,7 +592,7 @@ class TestActionClearVesselState:
 
         with patch("app.actions.handlers.IntegrationStateManager", return_value=mock_state_manager), \
              patch("app.services.activity_logger.publish_event", new_callable=AsyncMock):
-            result = await action_clear_vessel_state(integration=mock_integration, action_config=config)
+            result = await action_reset_cached_vessel_data(integration=mock_integration, action_config=config)
 
         assert result["vessels_cleared"] == 0
         assert mock_state_manager.delete_state.call_count == 1  # only known_vessels index

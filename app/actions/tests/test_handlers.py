@@ -1,7 +1,9 @@
 """Tests for Marine Monitor action handlers."""
 import pytest
-from datetime import timezone
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
+
+from erclient.er_errors import ERClientNotFound, ERClientBadCredentials, ERClientPermissionDenied
 
 from app.actions.handlers import (
     transform_track_to_observation,
@@ -11,6 +13,10 @@ from app.actions.handlers import (
     action_view_cached_vessel_data,
     action_reset_cached_vessel_data,
     _process_track,
+    _get_stale_vessel_ids,
+    _delete_stale_vessels_from_er,
+    _update_vessel_state,
+    _is_permanent_er_error,
 )
 from app.actions.tests.conftest import create_mock_client, patch_handler_dependencies
 
@@ -398,6 +404,7 @@ class TestActionPullVesselTracking:
         mock_config.api_key.get_secret_value.return_value = "test-key"
         mock_config.minimal_confidence = 0.1
         mock_config.earthranger_subject_group_name = None
+        mock_config.earthranger_subject_subtype_id = None
 
         with patch_handler_dependencies(
             mock_marine_monitor_client, mock_state_manager
@@ -458,6 +465,7 @@ class TestActionPullVesselTracking:
         mock_config.api_key.get_secret_value.return_value = "test-key"
         mock_config.minimal_confidence = 0.1
         mock_config.earthranger_subject_group_name = None
+        mock_config.earthranger_subject_subtype_id = None
 
         with patch_handler_dependencies(mock_client, mock_state_manager) as mocks:
             result = await action_pull_vessel_tracking(
@@ -490,6 +498,7 @@ class TestActionPullVesselTracking:
         mock_config.api_key.get_secret_value.return_value = "test-key"
         mock_config.minimal_confidence = 0.1
         mock_config.earthranger_subject_group_name = "Marine Monitor"
+        mock_config.earthranger_subject_subtype_id = None
 
         with patch_handler_dependencies(mock_marine_monitor_client, mock_state_manager) as mocks:
             await action_pull_vessel_tracking(
@@ -513,6 +522,7 @@ class TestActionPullVesselTracking:
         mock_config.api_key.get_secret_value.return_value = "test-key"
         mock_config.minimal_confidence = 0.1
         mock_config.earthranger_subject_group_name = None
+        mock_config.earthranger_subject_subtype_id = None
 
         with patch_handler_dependencies(mock_marine_monitor_client, mock_state_manager) as mocks:
             await action_pull_vessel_tracking(
@@ -522,6 +532,7 @@ class TestActionPullVesselTracking:
 
             payload = mocks["er_client"].post_sensor_observation.call_args[0][0]
             assert "subject_groups" not in payload
+            assert "subject_subtype_id" not in payload
 
 
 class TestActionViewCachedVesselData:
@@ -535,7 +546,6 @@ class TestActionViewCachedVesselData:
             {"last_seen": "2026-03-18T09:00:00Z"},  # vessel-222
         ])
         config = MagicMock()
-        config.notes = None
 
         with patch("app.actions.handlers.IntegrationStateManager", return_value=mock_state_manager), \
              patch("app.services.activity_logger.publish_event", new_callable=AsyncMock):
@@ -552,7 +562,6 @@ class TestActionViewCachedVesselData:
         """Returns empty list when Redis has no known_vessels state."""
         mock_state_manager.get_state = AsyncMock(return_value={})
         config = MagicMock()
-        config.notes = None
 
         with patch("app.actions.handlers.IntegrationStateManager", return_value=mock_state_manager), \
              patch("app.services.activity_logger.publish_event", new_callable=AsyncMock):
@@ -574,7 +583,6 @@ class TestActionResetCachedVesselData:
             "last_run": "2026-03-18T10:00:00Z",
         })
         config = MagicMock()
-        config.notes = None
 
         with patch("app.actions.handlers.IntegrationStateManager", return_value=mock_state_manager), \
              patch("app.services.activity_logger.publish_event", new_callable=AsyncMock):
@@ -588,7 +596,6 @@ class TestActionResetCachedVesselData:
         """Handles empty Redis state gracefully."""
         mock_state_manager.get_state = AsyncMock(return_value={})
         config = MagicMock()
-        config.notes = None
 
         with patch("app.actions.handlers.IntegrationStateManager", return_value=mock_state_manager), \
              patch("app.services.activity_logger.publish_event", new_callable=AsyncMock):
@@ -596,3 +603,303 @@ class TestActionResetCachedVesselData:
 
         assert result["vessels_cleared"] == 0
         assert mock_state_manager.delete_state.call_count == 1  # only known_vessels index
+
+
+class TestIsPermanentErError:
+
+    def test_bad_credentials_is_permanent(self):
+        assert _is_permanent_er_error(ERClientBadCredentials("msg")) is True
+
+    def test_permission_denied_is_permanent(self):
+        assert _is_permanent_er_error(ERClientPermissionDenied("msg")) is True
+
+    def test_not_found_is_not_permanent(self):
+        assert _is_permanent_er_error(ERClientNotFound("msg")) is False
+
+    def test_generic_exception_is_not_permanent(self):
+        assert _is_permanent_er_error(Exception("generic")) is False
+
+
+class TestDeleteVesselFromEarthRangerEdgeCases:
+
+    @pytest.mark.asyncio
+    async def test_source_not_found_returns_false(self):
+        """Returns False when manufacturer_id has no source in ER."""
+        mock_client = MagicMock()
+        mock_client.get_source_by_manufacturer_id = AsyncMock(
+            side_effect=ERClientNotFound("not found")
+        )
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+
+        with patch("app.actions.handlers.AsyncERClient", return_value=mock_client):
+            result = await delete_vessel_from_earthranger(
+                track_id="vessel-999",
+                er_base_url="https://test.pamdas.org",
+                er_token="test-token",
+            )
+
+        assert result is False
+        mock_client.delete_subject.assert_not_called()
+        mock_client.delete_source.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_no_subjects_returns_false(self):
+        """Returns False when source has no linked subjects."""
+        mock_client = MagicMock()
+        mock_client.get_source_by_manufacturer_id = AsyncMock(
+            return_value={"data": {"id": "source-uuid"}}
+        )
+        mock_client.get_source_subjects = AsyncMock(return_value=[])
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+
+        with patch("app.actions.handlers.AsyncERClient", return_value=mock_client):
+            result = await delete_vessel_from_earthranger(
+                track_id="vessel-999",
+                er_base_url="https://test.pamdas.org",
+                er_token="test-token",
+            )
+
+        assert result is False
+        mock_client.delete_subject.assert_not_called()
+        mock_client.delete_source.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_subject_missing_id_returns_false(self):
+        """Returns False when subject response has no 'id' field."""
+        mock_client = MagicMock()
+        mock_client.get_source_by_manufacturer_id = AsyncMock(
+            return_value={"data": {"id": "source-uuid"}}
+        )
+        mock_client.get_source_subjects = AsyncMock(return_value=[{"last_position_date": "2026-01-01T00:00:00Z"}])
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+
+        with patch("app.actions.handlers.AsyncERClient", return_value=mock_client):
+            result = await delete_vessel_from_earthranger(
+                track_id="vessel-999",
+                er_base_url="https://test.pamdas.org",
+                er_token="test-token",
+            )
+
+        assert result is False
+        mock_client.delete_subject.assert_not_called()
+
+
+class TestProcessTrackEdgeCases:
+
+    def test_no_timestamp_returns_none(self, sample_radar_station):
+        """Track with no timestamp (neither in track_detection nor last_update) is skipped."""
+        track = {"id": 1, "confidence": 0.8}
+        assert _process_track(track, sample_radar_station) is None
+
+    def test_invalid_timestamp_returns_none(self, sample_radar_station):
+        """Track with unparseable timestamp is skipped."""
+        track = {"id": 1, "confidence": 0.8, "last_update": "not-a-valid-date"}
+        assert _process_track(track, sample_radar_station) is None
+
+    def test_confidence_exactly_at_threshold_passes(self, sample_radar_station):
+        """Track with confidence equal to threshold is not filtered out."""
+        track = {
+            "id": 1,
+            "confidence": 0.5,
+            "last_update": "2026-01-09T12:00:00Z",
+            "track_detection": {"lat": 25.0, "lon": -111.0},
+        }
+        assert _process_track(track, sample_radar_station, minimal_confidence=0.5) is not None
+
+
+class TestGetStaleVesselIds:
+
+    @pytest.mark.asyncio
+    async def test_returns_vessels_not_in_active_set(self, mock_state_manager):
+        mock_state_manager.get_state = AsyncMock(return_value={
+            "track_ids": ["vessel-111", "vessel-222", "vessel-333"],
+        })
+        result = await _get_stale_vessel_ids(mock_state_manager, "integration-id", {"vessel-111"})
+        assert result == {"vessel-222", "vessel-333"}
+
+    @pytest.mark.asyncio
+    async def test_returns_empty_when_all_active(self, mock_state_manager):
+        mock_state_manager.get_state = AsyncMock(return_value={
+            "track_ids": ["vessel-111"],
+        })
+        result = await _get_stale_vessel_ids(mock_state_manager, "integration-id", {"vessel-111"})
+        assert result == set()
+
+    @pytest.mark.asyncio
+    async def test_returns_empty_when_no_known_state(self, mock_state_manager):
+        mock_state_manager.get_state = AsyncMock(return_value={})
+        result = await _get_stale_vessel_ids(mock_state_manager, "integration-id", {"vessel-111"})
+        assert result == set()
+
+
+class TestDeleteStaleVesselsFromEr:
+
+    @pytest.mark.asyncio
+    async def test_returns_all_successfully_deleted_ids(self):
+        with patch("app.actions.handlers.delete_vessel_from_earthranger", new_callable=AsyncMock, return_value=True):
+            result = await _delete_stale_vessels_from_er(
+                stale_vessel_ids={"vessel-111", "vessel-222"},
+                er_base_url="https://test.pamdas.org",
+                er_token="test-token",
+            )
+        assert set(result) == {"vessel-111", "vessel-222"}
+
+    @pytest.mark.asyncio
+    async def test_partial_deletion_returns_only_successful(self):
+        async def mock_delete(track_id, **kwargs):
+            return track_id == "vessel-111"
+
+        with patch("app.actions.handlers.delete_vessel_from_earthranger", side_effect=mock_delete):
+            result = await _delete_stale_vessels_from_er(
+                stale_vessel_ids={"vessel-111", "vessel-222"},
+                er_base_url="https://test.pamdas.org",
+                er_token="test-token",
+            )
+        assert result == ["vessel-111"]
+
+    @pytest.mark.asyncio
+    async def test_empty_stale_set_returns_empty_without_calling_delete(self):
+        with patch("app.actions.handlers.delete_vessel_from_earthranger", new_callable=AsyncMock) as mock_delete:
+            result = await _delete_stale_vessels_from_er(
+                stale_vessel_ids=set(),
+                er_base_url="https://test.pamdas.org",
+                er_token="test-token",
+            )
+        assert result == []
+        mock_delete.assert_not_called()
+
+
+class TestUpdateVesselState:
+
+    @pytest.mark.asyncio
+    async def test_deletes_per_vessel_key_for_each_deleted_vessel(self, mock_state_manager):
+        now = datetime(2026, 3, 23, 10, 0, 0, tzinfo=timezone.utc)
+        mock_state_manager.get_state = AsyncMock(return_value={})
+
+        await _update_vessel_state(
+            state_manager=mock_state_manager,
+            integration_id="integration-id",
+            active_track_ids=set(),
+            deleted_track_ids=["vessel-222", "vessel-333"],
+            now=now,
+        )
+
+        deleted_source_ids = {
+            call.kwargs["source_id"]
+            for call in mock_state_manager.delete_state.call_args_list
+        }
+        assert deleted_source_ids == {"vessel-222", "vessel-333"}
+
+    @pytest.mark.asyncio
+    async def test_updates_known_vessels_index(self, mock_state_manager):
+        now = datetime(2026, 3, 23, 10, 0, 0, tzinfo=timezone.utc)
+        mock_state_manager.get_state = AsyncMock(return_value={})
+
+        await _update_vessel_state(
+            state_manager=mock_state_manager,
+            integration_id="integration-id",
+            active_track_ids={"vessel-111"},
+            deleted_track_ids=[],
+            now=now,
+        )
+
+        known_vessels_call = mock_state_manager.set_state.call_args_list[0]
+        assert known_vessels_call.kwargs["source_id"] == "known_vessels"
+        assert "vessel-111" in known_vessels_call.kwargs["state"]["track_ids"]
+        assert known_vessels_call.kwargs["state"]["last_run"] == now.isoformat()
+
+    @pytest.mark.asyncio
+    async def test_refreshes_last_seen_and_preserves_existing_state(self, mock_state_manager):
+        now = datetime(2026, 3, 23, 10, 0, 0, tzinfo=timezone.utc)
+        mock_state_manager.get_state = AsyncMock(return_value={"custom_field": "value"})
+
+        await _update_vessel_state(
+            state_manager=mock_state_manager,
+            integration_id="integration-id",
+            active_track_ids={"vessel-111"},
+            deleted_track_ids=[],
+            now=now,
+        )
+
+        vessel_call = mock_state_manager.set_state.call_args_list[1]
+        assert vessel_call.kwargs["source_id"] == "vessel-111"
+        assert vessel_call.kwargs["state"]["last_seen"] == now.isoformat()
+        assert vessel_call.kwargs["state"]["custom_field"] == "value"
+
+
+class TestActionPullVesselTrackingDestinationValidation:
+
+    @pytest.mark.asyncio
+    async def test_skips_destination_without_auth_config(
+        self,
+        mock_integration,
+        mock_pull_config,
+        mock_marine_monitor_client,
+        mock_state_manager,
+    ):
+        """Destination with no auth config is skipped — no ER calls made."""
+        mock_dest_integration = MagicMock()
+        mock_dest_integration.get_action_config = MagicMock(return_value=None)
+
+        with patch_handler_dependencies(
+            mock_marine_monitor_client, mock_state_manager,
+            mock_dest_integration=mock_dest_integration,
+        ) as mocks:
+            await action_pull_vessel_tracking(
+                integration=mock_integration,
+                action_config=mock_pull_config,
+            )
+
+        mocks["er_client"].post_sensor_observation.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_skips_destination_without_token(
+        self,
+        mock_integration,
+        mock_pull_config,
+        mock_marine_monitor_client,
+        mock_state_manager,
+    ):
+        """Destination with missing token is skipped — no ER calls made."""
+        mock_dest_integration = MagicMock()
+        auth_config = MagicMock()
+        auth_config.data = {"token": None}
+        mock_dest_integration.get_action_config = MagicMock(return_value=auth_config)
+
+        with patch_handler_dependencies(
+            mock_marine_monitor_client, mock_state_manager,
+            mock_dest_integration=mock_dest_integration,
+        ) as mocks:
+            await action_pull_vessel_tracking(
+                integration=mock_integration,
+                action_config=mock_pull_config,
+            )
+
+        mocks["er_client"].post_sensor_observation.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_includes_subject_subtype_id_in_payload(
+        self,
+        mock_integration,
+        mock_marine_monitor_client,
+        mock_state_manager,
+    ):
+        """subject_subtype_id is included in the ER payload when configured."""
+        mock_config = MagicMock()
+        mock_config.api_url = "https://test.example.com/api"
+        mock_config.api_key.get_secret_value.return_value = "test-key"
+        mock_config.minimal_confidence = 0.1
+        mock_config.earthranger_subject_group_name = None
+        mock_config.earthranger_subject_subtype_id = "vessel"
+
+        with patch_handler_dependencies(mock_marine_monitor_client, mock_state_manager) as mocks:
+            await action_pull_vessel_tracking(
+                integration=mock_integration,
+                action_config=mock_config,
+            )
+
+        payload = mocks["er_client"].post_sensor_observation.call_args[0][0]
+        assert payload["subject_subtype_id"] == "vessel"

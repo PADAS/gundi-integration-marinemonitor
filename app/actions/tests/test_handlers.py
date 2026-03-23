@@ -532,7 +532,7 @@ class TestActionPullVesselTracking:
 
             payload = mocks["er_client"].post_sensor_observation.call_args[0][0]
             assert "subject_groups" not in payload
-            assert "subject_subtype_id" not in payload
+            assert "subject_subtype" not in payload
 
 
 class TestActionViewCachedVesselData:
@@ -881,7 +881,7 @@ class TestActionPullVesselTrackingDestinationValidation:
         mocks["er_client"].post_sensor_observation.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_includes_subject_subtype_id_in_payload(
+    async def test_includes_subject_subtype_in_payload(
         self,
         mock_integration,
         mock_marine_monitor_client,
@@ -902,4 +902,4 @@ class TestActionPullVesselTrackingDestinationValidation:
             )
 
         payload = mocks["er_client"].post_sensor_observation.call_args[0][0]
-        assert payload["subject_subtype_id"] == "vessel"
+        assert payload["subject_subtype"] == "vessel"

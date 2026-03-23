@@ -311,7 +311,7 @@ async def _post_observation_to_er(client: AsyncERClient, observation: dict, subj
     if subject_group_name:
         payload["subject_groups"] = [subject_group_name]
     if subject_subtype_id:
-        payload["subject_subtype_id"] = subject_subtype_id
+        payload["subject_subtype"] = subject_subtype_id
     await client.post_sensor_observation(payload)
 
 

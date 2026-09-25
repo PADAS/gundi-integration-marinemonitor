@@ -65,7 +65,7 @@ app/
 - Stale vessel IDs must be computed once before the destination loop, not inside it
 - EarthRanger deletion order: get source by `manufacturer_id` → patch most recent subject `is_active=False` → delete source; skip immediately on `ERClientBadCredentials` / `ERClientPermissionDenied`
 - Debug actions need `ExecutableActionMixin` + a dummy `notes: Optional[str]` field so the portal renders the section and shows the trigger button
-- Don't update tests during implementation — only when ready to push to GitHub
+- Tests use the `patch_handler_dependencies()` context manager, which mocks all handler dependencies at once
 
 ## State Management
 Redis-backed via `IntegrationStateManager`. Key format: `integration_state.{integration_id}.{action_id}.{source_id}`.
@@ -85,8 +85,3 @@ uv pip compile requirements.in -o requirements.txt
 ```
 
 Local action testing via Swagger UI at `http://localhost:8080/docs`. `config_overrides` must include **all** config fields (even null ones) or the endpoint returns 404.
-
-## Specialized Agents
-For implementation work, use the specialized agents in `.claude/agents/`:
-- `backend-developer` - Day-to-day development, writing features, fixing bugs, running tests
-- `code-reviewer` - Code review for quality, security, and connector pattern correctness

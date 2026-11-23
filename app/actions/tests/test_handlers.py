@@ -27,6 +27,10 @@ class TestBuildVesselName:
 
     radar_station = {"id": 45, "name": "San Basilio", "nickname": "san basilio"}
 
+    def test_named_radar_vessel_keeps_radar_suffix(self):
+        track = {"source": "radar", "radar_track_id": 20, "vessel_name": "Patrol"}
+        assert build_vessel_name(track, self.radar_station) == "Patrol (San Basilio)"
+
     def test_ais_vessel_with_name_uses_vessel_name(self):
         track = {"source": "ais", "radar_track_id": 232056448, "vessel_name": "ARKANA"}
         assert build_vessel_name(track, self.radar_station) == "ARKANA"
@@ -36,26 +40,26 @@ class TestBuildVesselName:
         track = {"source": "ais", "radar_track_id": 367684770, "vessel_name": vessel_name}
         assert build_vessel_name(track, self.radar_station) == "M2-vessel-367684770"
 
-    def test_radar_vessel_uses_radar_track_id(self):
+    def test_radar_vessel_uses_radar_track_id_and_radar_name(self):
         track = {"source": "radar", "radar_track_id": 20, "vessel_name": ""}
-        assert build_vessel_name(track, self.radar_station) == "M2-vessel-20"
+        assert build_vessel_name(track, self.radar_station) == "M2-vessel-20 (San Basilio)"
 
-    def test_radar_vessel_in_multi_radar_feed_adds_radar_nickname(self):
+    def test_radar_vessel_falls_back_to_radar_nickname(self):
         track = {"source": "radar", "radar_track_id": 20, "vessel_name": ""}
-        assert build_vessel_name(track, self.radar_station, multiple_radars=True) == "M2-vessel-20 (san basilio)"
+        station = {"id": 42, "nickname": "loreto2"}
+        assert build_vessel_name(track, station) == "M2-vessel-20 (loreto2)"
 
-    def test_radar_vessel_in_multi_radar_feed_falls_back_to_radar_name(self):
+    def test_radar_vessel_without_radar_label_has_no_suffix(self):
         track = {"source": "radar", "radar_track_id": 20, "vessel_name": ""}
-        station = {"id": 42, "name": "Loreto 2"}
-        assert build_vessel_name(track, station, multiple_radars=True) == "M2-vessel-20 (Loreto 2)"
+        assert build_vessel_name(track, {}) == "M2-vessel-20"
 
-    def test_ais_vessel_in_multi_radar_feed_has_no_radar_suffix(self):
-        track = {"source": "ais", "radar_track_id": 367684770, "vessel_name": "Class B"}
-        assert build_vessel_name(track, self.radar_station, multiple_radars=True) == "M2-vessel-367684770"
+    def test_non_string_vessel_name_does_not_crash(self):
+        track = {"source": "ais", "radar_track_id": 367684770, "vessel_name": 12345}
+        assert build_vessel_name(track, self.radar_station) == "12345"
 
     def test_missing_radar_track_id_falls_back_to_track_id(self):
         track = {"id": 55010156, "source": "radar", "vessel_name": ""}
-        assert build_vessel_name(track, self.radar_station) == "M2-vessel-55010156"
+        assert build_vessel_name(track, self.radar_station) == "M2-vessel-55010156 (San Basilio)"
 
 
 class TestTransformTrackToObservation:
@@ -77,6 +81,7 @@ class TestTransformTrackToObservation:
         """Test that vessel_name is used as subject_name when present."""
         track = {
             "id": 48590736,
+            "source": "ais",
             "vessel_name": "My Vessel",
             "last_update": "2026-01-09T12:00:00Z",
             "track_detection": {"lat": 25.0, "lon": -111.0},
@@ -95,7 +100,7 @@ class TestTransformTrackToObservation:
             "track_detection": {"lat": 25.0, "lon": -111.0},
         }
         observation = transform_track_to_observation(track, sample_radar_station)
-        assert observation["subject_name"] == "M2-vessel-20"
+        assert observation["subject_name"] == "M2-vessel-20 (Loreto 2)"
         assert observation["source"] == "vessel-48590736"
 
     def test_transform_includes_track_detection_fields(self, sample_track, sample_radar_station):

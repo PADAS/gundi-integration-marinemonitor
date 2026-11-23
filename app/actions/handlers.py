@@ -111,41 +111,44 @@ PLACEHOLDER_VESSEL_NAMES = {"class b"}
 def build_vessel_name(
     track: dict[str, Any],
     radar_station: dict[str, Any],
-    multiple_radars: bool = False,
 ) -> str:
     """Build the vessel name shown in EarthRanger, matching the M2 Viewer.
 
     - AIS vessel with a real name: the vessel name.
-    - Otherwise: "M2-vessel-<radar_track_id>" (MMSI for AIS, 1-3 digits for radar).
-    - Radar tracks in a feed with several radars also get the radar's short name,
-      because radar track numbers are only unique per radar.
+    - AIS vessel without one: "M2-vessel-<MMSI>".
+    - Radar vessel: "M2-vessel-<radar_track_id> (<radar name>)", or
+      "<vessel name> (<radar name>)" when the track carries a name. Radar track
+      numbers (1-3 digits) are only unique per radar, and EarthRanger matches
+      subjects by name, so the radar name keeps vessels from different radars apart.
     """
-    vessel_name = (track.get("vessel_name") or "").strip()
-    if vessel_name and vessel_name.lower() not in PLACEHOLDER_VESSEL_NAMES:
-        return vessel_name
+    vessel_name = str(track.get("vessel_name") or "").strip()
+    has_real_name = bool(vessel_name) and vessel_name.lower() not in PLACEHOLDER_VESSEL_NAMES
 
-    radar_track_id = track.get("radar_track_id")
-    if radar_track_id is None:
-        radar_track_id = track.get("id", "unknown")
-    name = f"M2-vessel-{radar_track_id}"
+    if has_real_name:
+        name = vessel_name
+    else:
+        radar_track_id = track.get("radar_track_id")
+        if radar_track_id is None:
+            radar_track_id = track.get("id", "unknown")
+        name = f"M2-vessel-{radar_track_id}"
 
-    if multiple_radars and track.get("source") != "ais":
-        radar_label = radar_station.get("nickname") or radar_station.get("name") or radar_station.get("id")
-        if radar_label:
-            name = f"{name} ({radar_label})"
+    if track.get("source") == "ais":
+        return name
+
+    radar_label = radar_station.get("name") or radar_station.get("nickname") or radar_station.get("id")
+    if radar_label:
+        name = f"{name} ({radar_label})"
     return name
 
 
 def transform_track_to_observation(
     track: dict[str, Any],
     radar_station: dict[str, Any],
-    multiple_radars: bool = False,
 ) -> dict[str, Any]:
     """Transform a Marine Monitor track to Gundi observation format.
 
     :param track: Track data from Marine Monitor API
     :param radar_station: Radar station data containing metadata
-    :param multiple_radars: True when the feed has more than one radar station
     :return: Observation in Gundi schema format
     """
     track_detection = track.get("track_detection", {})
@@ -153,7 +156,7 @@ def transform_track_to_observation(
 
     # Use track ID as source identifier, fallback to default if not set
     source_id = f"vessel-{track_id}"
-    subject_name = build_vessel_name(track, radar_station, multiple_radars)
+    subject_name = build_vessel_name(track, radar_station)
 
     # Prefer track_detection timestamp, fallback to last_update
     timestamp = track_detection.get("timestamp") or track.get("last_update")
@@ -216,7 +219,6 @@ def _process_track(
     track: dict[str, Any],
     radar_station: dict[str, Any],
     minimal_confidence: float = 0.1,
-    multiple_radars: bool = False,
 ) -> dict[str, Any] | None:
     """Process a single track and return observation if valid.
 
@@ -244,7 +246,7 @@ def _process_track(
         logger.warning(f"Failed to parse timestamp '{timestamp_str}': {e}")
         return None
 
-    return transform_track_to_observation(track, radar_station, multiple_radars)
+    return transform_track_to_observation(track, radar_station)
 
 
 async def _get_stale_vessel_ids(
@@ -380,7 +382,6 @@ async def action_pull_vessel_tracking(
         now = datetime.now(timezone.utc)
         all_observations: list[dict[str, Any]] = []
         active_track_ids: set[str] = set()
-        multiple_radars = len(radar_stations) > 1
 
         for radar_station in radar_stations:
             radar_id = radar_station.get("id")
@@ -391,7 +392,7 @@ async def action_pull_vessel_tracking(
             try:
                 for track in radar_station.get("tracks", []):
                     observation = _process_track(
-                        track, radar_station, action_config.minimal_confidence, multiple_radars
+                        track, radar_station, action_config.minimal_confidence
                     )
                     if observation:
                         all_observations.append(observation)

@@ -19,6 +19,7 @@ from app.actions.handlers import (
     _update_vessel_state,
     _is_permanent_er_error,
     _cleanup_kept_subjects,
+    _remember_kept_subject,
 )
 from app.actions.tests.conftest import create_mock_client, patch_handler_dependencies
 
@@ -995,75 +996,148 @@ def _mock_er_client(**methods):
     return client
 
 
+class _InMemoryState:
+    """Minimal stand-in for IntegrationStateManager that keeps state between calls."""
+
+    def __init__(self):
+        self.data = {}
+
+    async def get_state(self, integration_id, action_id, source_id="no-source"):
+        return dict(self.data.get((integration_id, action_id, source_id), {}))
+
+    async def set_state(self, integration_id, action_id, state, source_id="no-source"):
+        self.data[(integration_id, action_id, source_id)] = dict(state)
+
+    async def delete_state(self, integration_id, action_id, source_id="no-source"):
+        self.data.pop((integration_id, action_id, source_id), None)
+
+
 class TestCleanupKeptSubjects:
     """Shared subjects kept during cleanup are deleted once no source uses them."""
 
     ER_URL = "https://test.pamdas.org"
 
-    @pytest.mark.asyncio
-    async def test_both_sources_stale_subject_deleted_on_later_run(self, mock_state_manager):
-        """Two feeds lose the same vessel together: both keep the subject, a later run deletes it."""
-        # Run 1: each feed's cleanup still sees the other source, so the subject is kept
-        er_client = _mock_er_client(
+    def _kept(self, state):
+        return state.data.get(("int-1", "pull_vessel_tracking", "kept_subjects"), {})
+
+    def _remember(self, state):
+        async def remember(subject_id):
+            await _remember_kept_subject(state, "int-1", self.ER_URL, subject_id)
+        return remember
+
+    def _shared_vessel_client(self):
+        return _mock_er_client(
             get_source_by_manufacturer_id=AsyncMock(return_value={"data": {"id": "source-loreto2"}}),
             get_source_subjects=AsyncMock(return_value=[{"id": "subject-arkana"}]),
             get_subject_sources=AsyncMock(return_value=[{"id": "source-loreto2"}, {"id": "source-san-basilio"}]),
             delete_subject=AsyncMock(),
             delete_source=AsyncMock(),
         )
-        kept: list = []
-        with patch("app.actions.handlers.AsyncERClient", return_value=er_client):
-            assert await delete_vessel_from_earthranger("vessel-111", self.ER_URL, "token", kept_subject_ids=kept)
-            deleted = await _cleanup_kept_subjects(mock_state_manager, "int-1", self.ER_URL, "token", kept)
 
-        assert kept == ["subject-arkana"]
+    @pytest.mark.asyncio
+    async def test_both_sources_stale_subject_deleted_on_later_run(self):
+        """Two feeds lose the same vessel together: both keep the subject, a later run deletes it."""
+        state = _InMemoryState()
+        er_client = self._shared_vessel_client()
+
+        # Run 1: the cleanup still sees the other source, so the subject is kept
+        with patch("app.actions.handlers.AsyncERClient", return_value=er_client):
+            assert await delete_vessel_from_earthranger(
+                "vessel-111", self.ER_URL, "token", remember_kept_subject=self._remember(state)
+            )
+            deleted = await _cleanup_kept_subjects(state, "int-1", self.ER_URL, "token")
+
         assert deleted == []
         er_client.delete_subject.assert_not_called()
-        saved_state = mock_state_manager.set_state.call_args.kwargs["state"]
-        assert saved_state == {self.ER_URL: ["subject-arkana"]}
+        assert self._kept(state) == {self.ER_URL: ["subject-arkana"]}
 
         # Run 2: both source deletions have completed, so the subject has no sources left
-        mock_state_manager.get_state = AsyncMock(return_value=saved_state)
         er_client.get_subject_sources = AsyncMock(return_value=[])
         with patch("app.actions.handlers.AsyncERClient", return_value=er_client):
-            deleted = await _cleanup_kept_subjects(mock_state_manager, "int-1", self.ER_URL, "token", [])
+            deleted = await _cleanup_kept_subjects(state, "int-1", self.ER_URL, "token")
 
         assert deleted == ["subject-arkana"]
         er_client.delete_subject.assert_called_once_with("subject-arkana")
-        assert mock_state_manager.set_state.call_args.kwargs["state"] == {}
+        assert self._kept(state) == {}
 
     @pytest.mark.asyncio
-    async def test_subject_still_used_stays_pending(self, mock_state_manager):
-        mock_state_manager.get_state = AsyncMock(return_value={self.ER_URL: ["subject-arkana"]})
+    async def test_interrupted_run_still_deletes_subject_on_retry(self):
+        """The subject is saved before its source is deleted, so a run that stops right after
+        the source deletion (timeout, crash) doesn't lose it."""
+        state = _InMemoryState()
+        er_client = self._shared_vessel_client()
+
+        # Run 1 stops right after the source deletion, before the kept-subject recheck
+        with patch("app.actions.handlers.AsyncERClient", return_value=er_client):
+            assert await delete_vessel_from_earthranger(
+                "vessel-111", self.ER_URL, "token", remember_kept_subject=self._remember(state)
+            )
+        assert self._kept(state) == {self.ER_URL: ["subject-arkana"]}
+
+        # Retry: the source is gone, so the track can't lead back to the subject...
+        er_client.get_source_by_manufacturer_id = AsyncMock(side_effect=ERClientNotFound("not found"))
+        er_client.get_subject_sources = AsyncMock(return_value=[])
+        with patch("app.actions.handlers.AsyncERClient", return_value=er_client):
+            assert not await delete_vessel_from_earthranger(
+                "vessel-111", self.ER_URL, "token", remember_kept_subject=self._remember(state)
+            )
+            # ...but the saved subject is still rechecked and deleted
+            deleted = await _cleanup_kept_subjects(state, "int-1", self.ER_URL, "token")
+
+        assert deleted == ["subject-arkana"]
+        er_client.delete_subject.assert_called_once_with("subject-arkana")
+
+    @pytest.mark.asyncio
+    async def test_source_not_deleted_when_subject_cannot_be_saved(self):
+        """If saving the kept subject fails, the source is left alone so the next run can retry."""
+        er_client = self._shared_vessel_client()
+
+        async def failing_remember(subject_id):
+            raise ConnectionError("redis down")
+
+        with patch("app.actions.handlers.AsyncERClient", return_value=er_client):
+            result = await delete_vessel_from_earthranger(
+                "vessel-111", self.ER_URL, "token", remember_kept_subject=failing_remember
+            )
+
+        assert result is False
+        er_client.delete_source.assert_not_called()
+        er_client.delete_subject.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_subject_still_used_stays_pending(self):
+        state = _InMemoryState()
+        await _remember_kept_subject(state, "int-1", self.ER_URL, "subject-arkana")
         er_client = _mock_er_client(
             get_subject_sources=AsyncMock(return_value=[{"id": "source-san-basilio"}]),
             delete_subject=AsyncMock(),
         )
         with patch("app.actions.handlers.AsyncERClient", return_value=er_client):
-            deleted = await _cleanup_kept_subjects(mock_state_manager, "int-1", self.ER_URL, "token", [])
+            deleted = await _cleanup_kept_subjects(state, "int-1", self.ER_URL, "token")
 
         assert deleted == []
         er_client.delete_subject.assert_not_called()
-        assert mock_state_manager.set_state.call_args.kwargs["state"] == {self.ER_URL: ["subject-arkana"]}
+        assert self._kept(state) == {self.ER_URL: ["subject-arkana"]}
 
     @pytest.mark.asyncio
-    async def test_subject_already_gone_is_forgotten(self, mock_state_manager):
-        mock_state_manager.get_state = AsyncMock(return_value={self.ER_URL: ["subject-arkana"]})
+    async def test_subject_already_gone_is_forgotten(self):
+        state = _InMemoryState()
+        await _remember_kept_subject(state, "int-1", self.ER_URL, "subject-arkana")
         er_client = _mock_er_client(
             get_subject_sources=AsyncMock(side_effect=ERClientNotFound("not found")),
             delete_subject=AsyncMock(),
         )
         with patch("app.actions.handlers.AsyncERClient", return_value=er_client):
-            deleted = await _cleanup_kept_subjects(mock_state_manager, "int-1", self.ER_URL, "token", [])
+            deleted = await _cleanup_kept_subjects(state, "int-1", self.ER_URL, "token")
 
         assert deleted == []
         er_client.delete_subject.assert_not_called()
-        assert mock_state_manager.set_state.call_args.kwargs["state"] == {}
+        assert self._kept(state) == {}
 
     @pytest.mark.asyncio
     async def test_nothing_pending_makes_no_calls(self, mock_state_manager):
         with patch("app.actions.handlers.AsyncERClient") as er_cls:
-            deleted = await _cleanup_kept_subjects(mock_state_manager, "int-1", self.ER_URL, "token", [])
+            deleted = await _cleanup_kept_subjects(mock_state_manager, "int-1", self.ER_URL, "token")
 
         assert deleted == []
         er_cls.assert_not_called()

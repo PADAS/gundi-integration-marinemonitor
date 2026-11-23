@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from erclient.er_errors import ERClientNotFound, ERClientBadCredentials, ERClientPermissionDenied
 
 from app.actions.handlers import (
+    build_vessel_name,
     transform_track_to_observation,
     parse_timestamp,
     action_pull_vessel_tracking,
@@ -21,6 +22,42 @@ from app.actions.handlers import (
 from app.actions.tests.conftest import create_mock_client, patch_handler_dependencies
 
 
+class TestBuildVesselName:
+    """Tests for build_vessel_name, which matches the M2 Viewer naming."""
+
+    radar_station = {"id": 45, "name": "San Basilio", "nickname": "san basilio"}
+
+    def test_ais_vessel_with_name_uses_vessel_name(self):
+        track = {"source": "ais", "radar_track_id": 232056448, "vessel_name": "ARKANA"}
+        assert build_vessel_name(track, self.radar_station) == "ARKANA"
+
+    @pytest.mark.parametrize("vessel_name", ["", None, "Class B", "class b", "  "])
+    def test_ais_vessel_without_real_name_uses_mmsi(self, vessel_name):
+        track = {"source": "ais", "radar_track_id": 367684770, "vessel_name": vessel_name}
+        assert build_vessel_name(track, self.radar_station) == "M2-vessel-367684770"
+
+    def test_radar_vessel_uses_radar_track_id(self):
+        track = {"source": "radar", "radar_track_id": 20, "vessel_name": ""}
+        assert build_vessel_name(track, self.radar_station) == "M2-vessel-20"
+
+    def test_radar_vessel_in_multi_radar_feed_adds_radar_nickname(self):
+        track = {"source": "radar", "radar_track_id": 20, "vessel_name": ""}
+        assert build_vessel_name(track, self.radar_station, multiple_radars=True) == "M2-vessel-20 (san basilio)"
+
+    def test_radar_vessel_in_multi_radar_feed_falls_back_to_radar_name(self):
+        track = {"source": "radar", "radar_track_id": 20, "vessel_name": ""}
+        station = {"id": 42, "name": "Loreto 2"}
+        assert build_vessel_name(track, station, multiple_radars=True) == "M2-vessel-20 (Loreto 2)"
+
+    def test_ais_vessel_in_multi_radar_feed_has_no_radar_suffix(self):
+        track = {"source": "ais", "radar_track_id": 367684770, "vessel_name": "Class B"}
+        assert build_vessel_name(track, self.radar_station, multiple_radars=True) == "M2-vessel-367684770"
+
+    def test_missing_radar_track_id_falls_back_to_track_id(self):
+        track = {"id": 55010156, "source": "radar", "vessel_name": ""}
+        assert build_vessel_name(track, self.radar_station) == "M2-vessel-55010156"
+
+
 class TestTransformTrackToObservation:
     """Tests for transform_track_to_observation function."""
 
@@ -29,7 +66,7 @@ class TestTransformTrackToObservation:
         observation = transform_track_to_observation(sample_track, sample_radar_station)
 
         assert observation["source"] == "vessel-48590736"  # track id with prefix
-        assert observation["subject_name"] == "vessel-48590736 (Test Vessel)"
+        assert observation["subject_name"] == "Test Vessel"
         assert observation["type"] == "tracking-device"
         assert observation["subject_type"] == "vehicle"
         assert observation["recorded_at"] == "2026-01-09T12:19:23Z"
@@ -45,18 +82,21 @@ class TestTransformTrackToObservation:
             "track_detection": {"lat": 25.0, "lon": -111.0},
         }
         observation = transform_track_to_observation(track, sample_radar_station)
-        assert observation["subject_name"] == "vessel-48590736 (My Vessel)"
+        assert observation["subject_name"] == "My Vessel"
 
-    def test_transform_track_without_vessel_name_falls_back_to_manufacturer_id(self, sample_radar_station):
-        """Test that subject_name falls back to manufacturer_id when vessel_name is empty."""
+    def test_transform_track_without_vessel_name_uses_radar_track_id(self, sample_radar_station):
+        """Test that subject_name is M2-vessel-<radar_track_id> when vessel_name is empty."""
         track = {
             "id": 48590736,
+            "source": "radar",
+            "radar_track_id": 20,
             "vessel_name": "",
             "last_update": "2026-01-09T12:00:00Z",
             "track_detection": {"lat": 25.0, "lon": -111.0},
         }
         observation = transform_track_to_observation(track, sample_radar_station)
-        assert observation["subject_name"] == "vessel-48590736"
+        assert observation["subject_name"] == "M2-vessel-20"
+        assert observation["source"] == "vessel-48590736"
 
     def test_transform_includes_track_detection_fields(self, sample_track, sample_radar_station):
         """Test that track_detection fields are included in additional."""
@@ -288,7 +328,7 @@ class TestActionPullVesselTracking:
             assert mocks["er_client"].post_sensor_observation.call_count == 1
             payload = mocks["er_client"].post_sensor_observation.call_args[0][0]
             assert payload["manufacturer_id"] == "vessel-48590736"  # track id with prefix
-            assert payload["subject_name"] == "vessel-48590736 (Test Vessel)"
+            assert payload["subject_name"] == "Test Vessel"
 
     @pytest.mark.asyncio
     async def test_pull_vessel_tracking_no_tracks(

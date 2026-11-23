@@ -44,8 +44,8 @@ async def delete_vessel_from_earthranger(
 
     1. Gets the source by manufacturer_id (track_id)
     2. Gets all subjects linked to the source, picks most recent
-    3. Deletes the subject
-    4. Deletes the source (async)
+    3. If other sources share that subject, deletes only this source (async)
+    4. Otherwise deletes the subject, then the source (async)
 
     :param track_id: The vessel ID used as manufacturer_id in ER
     :param er_base_url: The EarthRanger base URL
@@ -82,6 +82,20 @@ async def delete_vessel_from_earthranger(
             if not subject_id:
                 logger.warning("Subject missing 'id' field")
                 return False
+
+            # The same vessel (e.g. an AIS MMSI seen by two radar feeds) can share one
+            # subject across several sources. Keep the subject while another source uses it.
+            subject_sources = await client.get_subject_sources(subject_id) or []
+            if isinstance(subject_sources, dict):
+                subject_sources = subject_sources.get("data", [])
+            other_source_ids = [s.get("id") for s in subject_sources if s.get("id") and s.get("id") != source_id]
+            if other_source_ids:
+                await client.delete_source(source_id, async_mode=True)
+                logger.info(
+                    f"Requested deletion of source {source_id} for vessel '{track_id}'; kept subject {subject_id} "
+                    f"because other sources still use it: {other_source_ids}"
+                )
+                return True
 
             await client.delete_subject(subject_id)
             await client.delete_source(source_id, async_mode=True)

@@ -287,6 +287,9 @@ class TestDeleteVesselFromEarthRanger:
                 }
             ]
         )
+        mock_client.get_subject_sources = AsyncMock(
+            return_value=[{"id": "source-uuid-123", "manufacturer_id": "48590736"}]
+        )
         mock_client.delete_subject = AsyncMock(return_value=None)
         mock_client.delete_source = AsyncMock(return_value=None)
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
@@ -302,6 +305,38 @@ class TestDeleteVesselFromEarthRanger:
         assert result is True
         mock_client.delete_subject.assert_called_once_with("subject-uuid")
         mock_client.delete_source.assert_called_once_with("source-uuid-123", async_mode=True)
+
+    @pytest.mark.asyncio
+    async def test_shared_subject_is_kept_when_only_one_source_goes_stale(self):
+        """An AIS vessel seen by two feeds shares one subject: only the stale source is deleted."""
+        mock_client = MagicMock()
+        mock_client.get_source_by_manufacturer_id = AsyncMock(
+            return_value={"data": {"id": "source-loreto2", "manufacturer_id": "vessel-111"}}
+        )
+        mock_client.get_source_subjects = AsyncMock(
+            return_value=[{"id": "subject-arkana", "last_position_date": "2026-01-09T12:00:00Z"}]
+        )
+        mock_client.get_subject_sources = AsyncMock(
+            return_value=[
+                {"id": "source-loreto2", "manufacturer_id": "vessel-111"},
+                {"id": "source-san-basilio", "manufacturer_id": "vessel-222"},
+            ]
+        )
+        mock_client.delete_subject = AsyncMock(return_value=None)
+        mock_client.delete_source = AsyncMock(return_value=None)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+
+        with patch("app.actions.handlers.AsyncERClient", return_value=mock_client):
+            result = await delete_vessel_from_earthranger(
+                track_id="vessel-111",
+                er_base_url="https://test.pamdas.org",
+                er_token="test-token",
+            )
+
+        assert result is True
+        mock_client.delete_subject.assert_not_called()
+        mock_client.delete_source.assert_called_once_with("source-loreto2", async_mode=True)
 
 
 class TestActionPullVesselTracking:

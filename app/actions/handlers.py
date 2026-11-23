@@ -37,6 +37,7 @@ async def delete_vessel_from_earthranger(
     track_id: str,
     er_base_url: str,
     er_token: str,
+    kept_subject_ids: Optional[list[str]] = None,
 ) -> bool:
     """Delete a stale vessel subject and its source from EarthRanger.
 
@@ -50,6 +51,8 @@ async def delete_vessel_from_earthranger(
     :param track_id: The vessel ID used as manufacturer_id in ER
     :param er_base_url: The EarthRanger base URL
     :param er_token: The EarthRanger auth token
+    :param kept_subject_ids: If given, ids of subjects kept because other sources use them are appended,
+        so a later run can delete them once no source is left
     :return: True if deletion was successful, False otherwise
     """
     try:
@@ -91,6 +94,8 @@ async def delete_vessel_from_earthranger(
             other_source_ids = [s.get("id") for s in subject_sources if s.get("id") and s.get("id") != source_id]
             if other_source_ids:
                 await client.delete_source(source_id, async_mode=True)
+                if kept_subject_ids is not None:
+                    kept_subject_ids.append(subject_id)
                 logger.info(
                     f"Requested deletion of source {source_id} for vessel '{track_id}'; kept subject {subject_id} "
                     f"because other sources still use it: {other_source_ids}"
@@ -285,10 +290,12 @@ async def _delete_stale_vessels_from_er(
     stale_vessel_ids: set[str],
     er_base_url: str,
     er_token: str,
+    kept_subject_ids: Optional[list[str]] = None,
 ) -> list[str]:
     """Delete stale vessels from a single EarthRanger destination.
 
-    Returns the list of track_ids successfully deleted.
+    Returns the list of track_ids successfully deleted. Subjects kept because other
+    sources still use them are appended to kept_subject_ids when it is given.
     """
     deleted_track_ids: list[str] = []
     for track_id in stale_vessel_ids:
@@ -297,11 +304,82 @@ async def _delete_stale_vessels_from_er(
             track_id=track_id,
             er_base_url=er_base_url,
             er_token=er_token,
+            kept_subject_ids=kept_subject_ids,
         )
         if deleted:
             deleted_track_ids.append(track_id)
             logger.info(f"Requested deletion of vessel '{track_id}' from EarthRanger and removed from Redis")
     return deleted_track_ids
+
+
+KEPT_SUBJECTS_STATE_ID = "kept_subjects"
+
+
+async def _cleanup_kept_subjects(
+    state_manager: IntegrationStateManager,
+    integration_id: str,
+    er_base_url: str,
+    er_token: str,
+    new_kept_subject_ids: list[str],
+) -> list[str]:
+    """Delete subjects kept during earlier cleanups once no source uses them anymore.
+
+    A subject shared by several sources is kept when one of them goes stale. If the
+    other sources go stale at about the same time (e.g. two feeds lose the same AIS
+    vessel together), every cleanup sees another source and keeps the subject. The
+    subject ids are stored per destination and rechecked on every run, so the subject
+    is deleted once its last source is gone.
+
+    Returns the ids of the subjects deleted.
+    """
+    state = await state_manager.get_state(
+        integration_id=integration_id,
+        action_id="pull_vessel_tracking",
+        source_id=KEPT_SUBJECTS_STATE_ID,
+    )
+    pending = list(dict.fromkeys(state.get(er_base_url, []) + new_kept_subject_ids))
+    if not pending:
+        return []
+
+    still_pending: list[str] = []
+    deleted_subject_ids: list[str] = []
+    try:
+        async with AsyncERClient(
+            service_root=f"{er_base_url}/api/v1.0",
+            token=er_token,
+        ) as client:
+            for subject_id in pending:
+                try:
+                    subject_sources = await client.get_subject_sources(subject_id) or []
+                    if isinstance(subject_sources, dict):
+                        subject_sources = subject_sources.get("data", [])
+                    if subject_sources:
+                        still_pending.append(subject_id)
+                        continue
+                    await client.delete_subject(subject_id)
+                    deleted_subject_ids.append(subject_id)
+                    logger.info(f"Deleted subject {subject_id} from {er_base_url}: no source uses it anymore")
+                except ERClientNotFound:
+                    logger.info(f"Kept subject {subject_id} no longer exists at {er_base_url}, forgetting it")
+                except Exception as e:
+                    logger.warning(f"Couldn't recheck kept subject {subject_id} at {er_base_url}: {e}")
+                    still_pending.append(subject_id)
+    except Exception as e:
+        logger.warning(f"Couldn't recheck kept subjects at {er_base_url}: {e}")
+        remaining = set(deleted_subject_ids)
+        still_pending = [sid for sid in pending if sid not in remaining]
+
+    if still_pending:
+        state[er_base_url] = still_pending
+    else:
+        state.pop(er_base_url, None)
+    await state_manager.set_state(
+        integration_id=integration_id,
+        action_id="pull_vessel_tracking",
+        state=state,
+        source_id=KEPT_SUBJECTS_STATE_ID,
+    )
+    return deleted_subject_ids
 
 
 async def _update_vessel_state(
@@ -465,10 +543,19 @@ async def action_pull_vessel_tracking(
                 results["observations_extracted"] = len(all_observations)
                 logger.info(f"Sent {len(all_observations)} observations to EarthRanger at {dest_base_url}")
 
+            kept_subject_ids: list[str] = []
             deleted = await _delete_stale_vessels_from_er(
                 stale_vessel_ids=stale_vessel_ids,
                 er_base_url=dest_base_url,
                 er_token=dest_token,
+                kept_subject_ids=kept_subject_ids,
+            )
+            await _cleanup_kept_subjects(
+                state_manager=state_manager,
+                integration_id=integration_id,
+                er_base_url=dest_base_url,
+                er_token=dest_token,
+                new_kept_subject_ids=kept_subject_ids,
             )
             # Accumulate unique deleted IDs across all destinations
             all_deleted_track_ids = list(set(all_deleted_track_ids) | set(deleted))

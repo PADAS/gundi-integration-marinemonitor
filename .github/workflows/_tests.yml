@@ -4,7 +4,10 @@ on:
 
 jobs:
   run_unit_tests:
-    runs-on: ubuntu-latest
+    # Pinned: pyjq 2.6.0 builds its bundled oniguruma from source, which fails on
+    # ubuntu-26.04 (GCC 15 defaults to C23). ubuntu-latest started moving there in
+    # October 2026. Unpin once pyjq builds there or is replaced.
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout branch
         uses: actions/checkout@v4
@@ -14,10 +17,16 @@ jobs:
       - name: Install pip
         run: python -m ensurepip --upgrade
       - name: Install pip tools
-        run: pip install pip-tools
-      - name: Install compile dependencies
-        run: pip-compile --output-file=requirements.txt requirements-base.in requirements-dev.in requirements.in
+        # typing_extensions listed explicitly: pip-tools 7.6.0 imports it on
+        # Python 3.10 without declaring it as a dependency
+        run: pip install pip-tools typing_extensions
+      - name: Compile dependencies
+        # requirements-dev.in constrains itself to requirements.txt, so the prod lock
+        # must exist before the dev lock is compiled.
+        run: |
+          pip-compile --output-file=requirements.txt requirements-base.in requirements.in
+          pip-compile --output-file=requirements-dev.txt requirements-dev.in requirements-test.in
       - name: Install dependencies
-        run: pip install --no-cache-dir -r requirements.txt
+        run: pip install --no-cache-dir -r requirements.txt -r requirements-dev.txt
       - name: Run unit tests
         run: pytest

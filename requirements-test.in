@@ -1,0 +1,5 @@
+# Add your integration-specific test-only dependencies here (respx, freezegun, ...).
+# They compile into requirements-dev.txt with requirements-dev.in, so they reach CI and
+# the devimage stage but never the production image. Runtime deps go in requirements.in.
+# 0.22 is the first release that supports httpx 0.28
+respx~=0.22.0

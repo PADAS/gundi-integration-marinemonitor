@@ -1,5 +1,6 @@
 """Action handlers for Marine Monitor integration."""
 import logging
+import uuid
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -18,7 +19,7 @@ from app.actions.marine_monitor import MarineMonitorClient
 from app.services.action_scheduler import crontab_schedule
 from app import settings
 from app.services.activity_logger import activity_logger, ephemeral_run, log_action_activity
-from app.services.retry_policies import is_transient_gundi_error
+from app.services.retry_policies import REDIS_RETRY, is_transient_gundi_error
 from app.services.state import IntegrationStateManager
 
 logger = logging.getLogger(__name__)
@@ -321,6 +322,37 @@ PULL_LOCK_STATE_ID = "run_lock"
 # Longer than the runner's own execution cap, so a lock left by a crashed run
 # expires on its own soon after any run could still be going.
 PULL_LOCK_TTL_SECONDS = settings.MAX_ACTION_EXECUTION_TIME + 60
+# Deletes the lock only if it still holds this run's token, in one step, so a
+# retried release can never remove a lock another run has taken since.
+_RELEASE_PULL_LOCK_SCRIPT = (
+    "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end"
+)
+
+
+def _pull_lock_key(integration_id: str) -> str:
+    # Same key layout as IntegrationStateManager uses for state.
+    return f"integration_state.{integration_id}.{PULL_ACTION_ID}.{PULL_LOCK_STATE_ID}"
+
+
+async def _acquire_pull_lock(state_manager: IntegrationStateManager, integration_id: str) -> Optional[str]:
+    """Take the pull lock with a token unique to this run. Returns the token, or None if another run holds it."""
+    key = _pull_lock_key(integration_id)
+    token = uuid.uuid4().hex
+    async for attempt in stamina.retry_context(**REDIS_RETRY):
+        with attempt:
+            if await state_manager.db_client.set(key, token, ex=PULL_LOCK_TTL_SECONDS, nx=True):
+                return token
+            # A retried SET whose first reply was lost finds our own token.
+            current = await state_manager.db_client.get(key)
+    if current is not None and (current.decode() if isinstance(current, bytes) else current) == token:
+        return token
+    return None
+
+
+async def _release_pull_lock(state_manager: IntegrationStateManager, integration_id: str, token: str) -> None:
+    async for attempt in stamina.retry_context(**REDIS_RETRY):
+        with attempt:
+            await state_manager.db_client.eval(_RELEASE_PULL_LOCK_SCRIPT, 1, _pull_lock_key(integration_id), token)
 
 
 @crontab_schedule("*/5 * * * *")  # Run every 5 minutes
@@ -342,11 +374,10 @@ async def action_pull_vessel_tracking(
     # two runs at once would overwrite each other's vessel state in Redis.
     # Ephemeral runs write no state, so they need no lock.
     use_lock = not ephemeral_run.get()
+    lock_token = None
     if use_lock:
-        got_lock = await state_manager.set_if_absent(
-            integration_id, PULL_ACTION_ID, ttl_seconds=PULL_LOCK_TTL_SECONDS, source_id=PULL_LOCK_STATE_ID,
-        )
-        if not got_lock:
+        lock_token = await _acquire_pull_lock(state_manager, integration_id)
+        if lock_token is None:
             logger.info(f"Skipping vessel pull for integration '{integration_id}': another run is still in progress")
             await log_action_activity(
                 integration_id=integration_id,
@@ -358,9 +389,9 @@ async def action_pull_vessel_tracking(
     try:
         return await _pull_vessel_tracking(integration_id, action_config, state_manager)
     finally:
-        if use_lock:
+        if lock_token is not None:
             try:
-                await state_manager.delete_state(integration_id, PULL_ACTION_ID, source_id=PULL_LOCK_STATE_ID)
+                await _release_pull_lock(state_manager, integration_id, lock_token)
             except Exception:
                 # The lock's TTL frees it anyway; never let the release hide
                 # the run's own result or error.

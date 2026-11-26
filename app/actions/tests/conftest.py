@@ -143,7 +143,11 @@ def mock_state_manager():
     state_manager.get_state = AsyncMock(return_value={})
     state_manager.set_state = AsyncMock()
     state_manager.delete_state = AsyncMock()
-    state_manager.set_if_absent = AsyncMock(return_value=True)
+    # Raw Redis calls the pull lock makes: the lock is free by default.
+    state_manager.db_client = MagicMock()
+    state_manager.db_client.set = AsyncMock(return_value=True)
+    state_manager.db_client.get = AsyncMock(return_value=None)
+    state_manager.db_client.eval = AsyncMock(return_value=1)
     return state_manager
 
 

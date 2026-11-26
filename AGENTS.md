@@ -80,8 +80,10 @@ pytest app/actions/tests/ -v
 # Local dev stack (Redis + PubSub emulator + FastAPI with debugpy on :5678, uvicorn on :8080)
 cd local && docker-compose up
 
-# Compile dependencies after editing requirements.in
-uv pip compile requirements.in -o requirements.txt
+# Compile dependencies (Python 3.10, pip-tools) after editing requirements.in or requirements-test.in.
+# Runtime deps go in requirements.in, test-only deps in requirements-test.in.
+pip-compile --output-file=requirements.txt requirements-base.in requirements.in
+pip-compile --output-file=requirements-dev.txt requirements-dev.in requirements-test.in
 ```
 
 Local action testing via Swagger UI at `http://localhost:8080/docs`. `config_overrides` must include **all** config fields (even null ones) or the endpoint returns 404.

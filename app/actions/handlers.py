@@ -2,7 +2,7 @@
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 import backoff
 import stamina
@@ -39,6 +39,7 @@ async def delete_vessel_from_earthranger(
     track_id: str,
     er_base_url: str,
     er_token: str,
+    remember_kept_subject: Optional[Callable[[str], Awaitable[None]]] = None,
 ) -> bool:
     """Delete a stale vessel subject and its source from EarthRanger.
 
@@ -46,12 +47,14 @@ async def delete_vessel_from_earthranger(
 
     1. Gets the source by manufacturer_id (track_id)
     2. Gets all subjects linked to the source, picks most recent
-    3. Deletes the subject
-    4. Deletes the source (async)
+    3. If other sources share that subject, deletes only this source (async)
+    4. Otherwise deletes the subject, then the source (async)
 
     :param track_id: The vessel ID used as manufacturer_id in ER
     :param er_base_url: The EarthRanger base URL
     :param er_token: The EarthRanger auth token
+    :param remember_kept_subject: Called with the id of a subject kept because other sources use it,
+        before its source is deleted, so a later run can delete it once no source is left
     :return: True if deletion was successful, False otherwise
     """
     try:
@@ -85,6 +88,24 @@ async def delete_vessel_from_earthranger(
                 logger.warning("Subject missing 'id' field")
                 return False
 
+            # The same vessel (e.g. an AIS MMSI seen by two radar feeds) can share one
+            # subject across several sources. Keep the subject while another source uses it.
+            subject_sources = await client.get_subject_sources(subject_id) or []
+            if isinstance(subject_sources, dict):
+                subject_sources = subject_sources.get("data", [])
+            other_source_ids = [s.get("id") for s in subject_sources if s.get("id") and s.get("id") != source_id]
+            if other_source_ids:
+                # Record the subject before deleting the source: once the source is gone,
+                # a retry can no longer find the subject from this track.
+                if remember_kept_subject is not None:
+                    await remember_kept_subject(subject_id)
+                await client.delete_source(source_id, async_mode=True)
+                logger.info(
+                    f"Requested deletion of source {source_id} for vessel '{track_id}'; kept subject {subject_id} "
+                    f"because other sources still use it: {other_source_ids}"
+                )
+                return True
+
             await client.delete_subject(subject_id)
             await client.delete_source(source_id, async_mode=True)
             logger.info(f"Requested deletion of vessel '{track_id}' from EarthRanger (subject: {subject_id}, source: {source_id})")
@@ -106,6 +127,43 @@ def _add_optional_field(
         additional[key] = transform(value) if transform else value
 
 
+# Names Marine Monitor sends when an AIS vessel has no real name
+PLACEHOLDER_VESSEL_NAMES = {"class b"}
+
+
+def build_vessel_name(
+    track: dict[str, Any],
+    radar_station: dict[str, Any],
+) -> str:
+    """Build the vessel name shown in EarthRanger, matching the M2 Viewer.
+
+    - AIS vessel with a real name: the vessel name.
+    - AIS vessel without one: "M2-vessel-<MMSI>".
+    - Radar vessel: "M2-vessel-<radar_track_id> (<radar name>)", or
+      "<vessel name> (<radar name>)" when the track carries a name. Radar track
+      numbers (1-3 digits) are only unique per radar, and EarthRanger matches
+      subjects by name, so the radar name keeps vessels from different radars apart.
+    """
+    vessel_name = str(track.get("vessel_name") or "").strip()
+    has_real_name = bool(vessel_name) and vessel_name.lower() not in PLACEHOLDER_VESSEL_NAMES
+
+    if has_real_name:
+        name = vessel_name
+    else:
+        radar_track_id = track.get("radar_track_id")
+        if radar_track_id is None:
+            radar_track_id = track.get("id", "unknown")
+        name = f"M2-vessel-{radar_track_id}"
+
+    if track.get("source") == "ais":
+        return name
+
+    radar_label = radar_station.get("name") or radar_station.get("nickname") or radar_station.get("id")
+    if radar_label:
+        name = f"{name} ({radar_label})"
+    return name
+
+
 def transform_track_to_observation(
     track: dict[str, Any],
     radar_station: dict[str, Any],
@@ -121,8 +179,7 @@ def transform_track_to_observation(
 
     # Use track ID as source identifier, fallback to default if not set
     source_id = f"vessel-{track_id}"
-    vessel_name = track.get("vessel_name")
-    subject_name = f"{source_id} ({vessel_name})" if vessel_name else source_id
+    subject_name = build_vessel_name(track, radar_station)
 
     # Prefer track_detection timestamp, fallback to last_update
     timestamp = track_detection.get("timestamp") or track.get("last_update")
@@ -237,10 +294,12 @@ async def _delete_stale_vessels_from_er(
     stale_vessel_ids: set[str],
     er_base_url: str,
     er_token: str,
+    remember_kept_subject: Optional[Callable[[str], Awaitable[None]]] = None,
 ) -> list[str]:
     """Delete stale vessels from a single EarthRanger destination.
 
-    Returns the list of track_ids successfully deleted.
+    Returns the list of track_ids successfully deleted. Subjects kept because other
+    sources still use them are passed to remember_kept_subject when it is given.
     """
     deleted_track_ids: list[str] = []
     for track_id in stale_vessel_ids:
@@ -249,11 +308,106 @@ async def _delete_stale_vessels_from_er(
             track_id=track_id,
             er_base_url=er_base_url,
             er_token=er_token,
+            remember_kept_subject=remember_kept_subject,
         )
         if deleted:
             deleted_track_ids.append(track_id)
             logger.info(f"Requested deletion of vessel '{track_id}' from EarthRanger and removed from Redis")
     return deleted_track_ids
+
+
+KEPT_SUBJECTS_STATE_ID = "kept_subjects"
+
+
+async def _remember_kept_subject(
+    state_manager: IntegrationStateManager,
+    integration_id: str,
+    er_base_url: str,
+    subject_id: str,
+) -> None:
+    """Store a kept subject id for this destination so later runs recheck it."""
+    state = await state_manager.get_state(
+        integration_id=integration_id,
+        action_id="pull_vessel_tracking",
+        source_id=KEPT_SUBJECTS_STATE_ID,
+    )
+    pending = state.get(er_base_url, [])
+    if subject_id in pending:
+        return
+    state[er_base_url] = pending + [subject_id]
+    await state_manager.set_state(
+        integration_id=integration_id,
+        action_id="pull_vessel_tracking",
+        state=state,
+        source_id=KEPT_SUBJECTS_STATE_ID,
+    )
+
+
+async def _cleanup_kept_subjects(
+    state_manager: IntegrationStateManager,
+    integration_id: str,
+    er_base_url: str,
+    er_token: str,
+) -> list[str]:
+    """Delete subjects kept during earlier cleanups once no source uses them anymore.
+
+    A subject shared by several sources is kept when one of them goes stale. If the
+    other sources go stale at about the same time (e.g. two feeds lose the same AIS
+    vessel together), every cleanup sees another source and keeps the subject. The
+    subject ids are stored per destination before their source is deleted and
+    rechecked on every run, so the subject is deleted once its last source is gone,
+    even if an earlier run was interrupted.
+
+    Returns the ids of the subjects deleted.
+    """
+    state = await state_manager.get_state(
+        integration_id=integration_id,
+        action_id="pull_vessel_tracking",
+        source_id=KEPT_SUBJECTS_STATE_ID,
+    )
+    pending = list(dict.fromkeys(state.get(er_base_url, [])))
+    if not pending:
+        return []
+
+    still_pending: list[str] = []
+    deleted_subject_ids: list[str] = []
+    try:
+        async with AsyncERClient(
+            service_root=f"{er_base_url}/api/v1.0",
+            token=er_token,
+        ) as client:
+            for subject_id in pending:
+                try:
+                    subject_sources = await client.get_subject_sources(subject_id) or []
+                    if isinstance(subject_sources, dict):
+                        subject_sources = subject_sources.get("data", [])
+                    if subject_sources:
+                        still_pending.append(subject_id)
+                        continue
+                    await client.delete_subject(subject_id)
+                    deleted_subject_ids.append(subject_id)
+                    logger.info(f"Deleted subject {subject_id} from {er_base_url}: no source uses it anymore")
+                except ERClientNotFound:
+                    logger.info(f"Kept subject {subject_id} no longer exists at {er_base_url}, forgetting it")
+                except Exception as e:
+                    logger.warning(f"Couldn't recheck kept subject {subject_id} at {er_base_url}: {e}")
+                    still_pending.append(subject_id)
+    except Exception as e:
+        logger.warning(f"Couldn't recheck kept subjects at {er_base_url}: {e}")
+        remaining = set(deleted_subject_ids)
+        still_pending = [sid for sid in pending if sid not in remaining]
+
+    if still_pending:
+        state[er_base_url] = still_pending
+    else:
+        state.pop(er_base_url, None)
+    await state_manager.set_state(
+        integration_id=integration_id,
+        action_id="pull_vessel_tracking",
+        state=state,
+        source_id=KEPT_SUBJECTS_STATE_ID,
+    )
+    return deleted_subject_ids
 
 
 async def _update_vessel_state(
@@ -488,8 +642,18 @@ async def _pull_vessel_tracking(
                 results["observations_extracted"] = len(all_observations)
                 logger.info(f"Sent {len(all_observations)} observations to EarthRanger at {dest_base_url}")
 
+            async def remember_kept_subject(subject_id: str, er_base_url: str = dest_base_url) -> None:
+                await _remember_kept_subject(state_manager, integration_id, er_base_url, subject_id)
+
             deleted = await _delete_stale_vessels_from_er(
                 stale_vessel_ids=stale_vessel_ids,
+                er_base_url=dest_base_url,
+                er_token=dest_token,
+                remember_kept_subject=remember_kept_subject,
+            )
+            await _cleanup_kept_subjects(
+                state_manager=state_manager,
+                integration_id=integration_id,
                 er_base_url=dest_base_url,
                 er_token=dest_token,
             )

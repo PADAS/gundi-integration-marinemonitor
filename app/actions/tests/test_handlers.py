@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from erclient.er_errors import ERClientNotFound, ERClientBadCredentials, ERClientPermissionDenied
 
 from app.actions.handlers import (
+    build_vessel_name,
     transform_track_to_observation,
     parse_timestamp,
     action_pull_vessel_tracking,
@@ -17,8 +18,50 @@ from app.actions.handlers import (
     _delete_stale_vessels_from_er,
     _update_vessel_state,
     _is_permanent_er_error,
+    _cleanup_kept_subjects,
+    _remember_kept_subject,
 )
 from app.actions.tests.conftest import create_mock_client, patch_handler_dependencies
+
+
+class TestBuildVesselName:
+    """Tests for build_vessel_name, which matches the M2 Viewer naming."""
+
+    radar_station = {"id": 45, "name": "San Basilio", "nickname": "san basilio"}
+
+    def test_named_radar_vessel_keeps_radar_suffix(self):
+        track = {"source": "radar", "radar_track_id": 20, "vessel_name": "Patrol"}
+        assert build_vessel_name(track, self.radar_station) == "Patrol (San Basilio)"
+
+    def test_ais_vessel_with_name_uses_vessel_name(self):
+        track = {"source": "ais", "radar_track_id": 232056448, "vessel_name": "ARKANA"}
+        assert build_vessel_name(track, self.radar_station) == "ARKANA"
+
+    @pytest.mark.parametrize("vessel_name", ["", None, "Class B", "class b", "  "])
+    def test_ais_vessel_without_real_name_uses_mmsi(self, vessel_name):
+        track = {"source": "ais", "radar_track_id": 367684770, "vessel_name": vessel_name}
+        assert build_vessel_name(track, self.radar_station) == "M2-vessel-367684770"
+
+    def test_radar_vessel_uses_radar_track_id_and_radar_name(self):
+        track = {"source": "radar", "radar_track_id": 20, "vessel_name": ""}
+        assert build_vessel_name(track, self.radar_station) == "M2-vessel-20 (San Basilio)"
+
+    def test_radar_vessel_falls_back_to_radar_nickname(self):
+        track = {"source": "radar", "radar_track_id": 20, "vessel_name": ""}
+        station = {"id": 42, "nickname": "loreto2"}
+        assert build_vessel_name(track, station) == "M2-vessel-20 (loreto2)"
+
+    def test_radar_vessel_without_radar_label_has_no_suffix(self):
+        track = {"source": "radar", "radar_track_id": 20, "vessel_name": ""}
+        assert build_vessel_name(track, {}) == "M2-vessel-20"
+
+    def test_non_string_vessel_name_does_not_crash(self):
+        track = {"source": "ais", "radar_track_id": 367684770, "vessel_name": 12345}
+        assert build_vessel_name(track, self.radar_station) == "12345"
+
+    def test_missing_radar_track_id_falls_back_to_track_id(self):
+        track = {"id": 55010156, "source": "radar", "vessel_name": ""}
+        assert build_vessel_name(track, self.radar_station) == "M2-vessel-55010156 (San Basilio)"
 
 
 class TestTransformTrackToObservation:
@@ -29,7 +72,7 @@ class TestTransformTrackToObservation:
         observation = transform_track_to_observation(sample_track, sample_radar_station)
 
         assert observation["source"] == "vessel-48590736"  # track id with prefix
-        assert observation["subject_name"] == "vessel-48590736 (Test Vessel)"
+        assert observation["subject_name"] == "Test Vessel"
         assert observation["type"] == "tracking-device"
         assert observation["subject_type"] == "vehicle"
         assert observation["recorded_at"] == "2026-01-09T12:19:23Z"
@@ -40,23 +83,27 @@ class TestTransformTrackToObservation:
         """Test that vessel_name is used as subject_name when present."""
         track = {
             "id": 48590736,
+            "source": "ais",
             "vessel_name": "My Vessel",
             "last_update": "2026-01-09T12:00:00Z",
             "track_detection": {"lat": 25.0, "lon": -111.0},
         }
         observation = transform_track_to_observation(track, sample_radar_station)
-        assert observation["subject_name"] == "vessel-48590736 (My Vessel)"
+        assert observation["subject_name"] == "My Vessel"
 
-    def test_transform_track_without_vessel_name_falls_back_to_manufacturer_id(self, sample_radar_station):
-        """Test that subject_name falls back to manufacturer_id when vessel_name is empty."""
+    def test_transform_track_without_vessel_name_uses_radar_track_id(self, sample_radar_station):
+        """Test that subject_name is M2-vessel-<radar_track_id> when vessel_name is empty."""
         track = {
             "id": 48590736,
+            "source": "radar",
+            "radar_track_id": 20,
             "vessel_name": "",
             "last_update": "2026-01-09T12:00:00Z",
             "track_detection": {"lat": 25.0, "lon": -111.0},
         }
         observation = transform_track_to_observation(track, sample_radar_station)
-        assert observation["subject_name"] == "vessel-48590736"
+        assert observation["subject_name"] == "M2-vessel-20 (Loreto 2)"
+        assert observation["source"] == "vessel-48590736"
 
     def test_transform_includes_track_detection_fields(self, sample_track, sample_radar_station):
         """Test that track_detection fields are included in additional."""
@@ -242,6 +289,9 @@ class TestDeleteVesselFromEarthRanger:
                 }
             ]
         )
+        mock_client.get_subject_sources = AsyncMock(
+            return_value=[{"id": "source-uuid-123", "manufacturer_id": "48590736"}]
+        )
         mock_client.delete_subject = AsyncMock(return_value=None)
         mock_client.delete_source = AsyncMock(return_value=None)
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
@@ -257,6 +307,38 @@ class TestDeleteVesselFromEarthRanger:
         assert result is True
         mock_client.delete_subject.assert_called_once_with("subject-uuid")
         mock_client.delete_source.assert_called_once_with("source-uuid-123", async_mode=True)
+
+    @pytest.mark.asyncio
+    async def test_shared_subject_is_kept_when_only_one_source_goes_stale(self):
+        """An AIS vessel seen by two feeds shares one subject: only the stale source is deleted."""
+        mock_client = MagicMock()
+        mock_client.get_source_by_manufacturer_id = AsyncMock(
+            return_value={"data": {"id": "source-loreto2", "manufacturer_id": "vessel-111"}}
+        )
+        mock_client.get_source_subjects = AsyncMock(
+            return_value=[{"id": "subject-arkana", "last_position_date": "2026-01-09T12:00:00Z"}]
+        )
+        mock_client.get_subject_sources = AsyncMock(
+            return_value=[
+                {"id": "source-loreto2", "manufacturer_id": "vessel-111"},
+                {"id": "source-san-basilio", "manufacturer_id": "vessel-222"},
+            ]
+        )
+        mock_client.delete_subject = AsyncMock(return_value=None)
+        mock_client.delete_source = AsyncMock(return_value=None)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+
+        with patch("app.actions.handlers.AsyncERClient", return_value=mock_client):
+            result = await delete_vessel_from_earthranger(
+                track_id="vessel-111",
+                er_base_url="https://test.pamdas.org",
+                er_token="test-token",
+            )
+
+        assert result is True
+        mock_client.delete_subject.assert_not_called()
+        mock_client.delete_source.assert_called_once_with("source-loreto2", async_mode=True)
 
 
 class TestActionPullVesselTracking:
@@ -288,7 +370,7 @@ class TestActionPullVesselTracking:
             assert mocks["er_client"].post_sensor_observation.call_count == 1
             payload = mocks["er_client"].post_sensor_observation.call_args[0][0]
             assert payload["manufacturer_id"] == "vessel-48590736"  # track id with prefix
-            assert payload["subject_name"] == "vessel-48590736 (Test Vessel)"
+            assert payload["subject_name"] == "Test Vessel"
 
     @pytest.mark.asyncio
     async def test_pull_vessel_tracking_no_tracks(
@@ -903,3 +985,160 @@ class TestActionPullVesselTrackingDestinationValidation:
 
         payload = mocks["er_client"].post_sensor_observation.call_args[0][0]
         assert payload["subject_subtype"] == "vessel"
+
+
+def _mock_er_client(**methods):
+    client = MagicMock()
+    for name, value in methods.items():
+        setattr(client, name, value)
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=None)
+    return client
+
+
+class _InMemoryState:
+    """Minimal stand-in for IntegrationStateManager that keeps state between calls."""
+
+    def __init__(self):
+        self.data = {}
+
+    async def get_state(self, integration_id, action_id, source_id="no-source"):
+        return dict(self.data.get((integration_id, action_id, source_id), {}))
+
+    async def set_state(self, integration_id, action_id, state, source_id="no-source"):
+        self.data[(integration_id, action_id, source_id)] = dict(state)
+
+    async def delete_state(self, integration_id, action_id, source_id="no-source"):
+        self.data.pop((integration_id, action_id, source_id), None)
+
+
+class TestCleanupKeptSubjects:
+    """Shared subjects kept during cleanup are deleted once no source uses them."""
+
+    ER_URL = "https://test.pamdas.org"
+
+    def _kept(self, state):
+        return state.data.get(("int-1", "pull_vessel_tracking", "kept_subjects"), {})
+
+    def _remember(self, state):
+        async def remember(subject_id):
+            await _remember_kept_subject(state, "int-1", self.ER_URL, subject_id)
+        return remember
+
+    def _shared_vessel_client(self):
+        return _mock_er_client(
+            get_source_by_manufacturer_id=AsyncMock(return_value={"data": {"id": "source-loreto2"}}),
+            get_source_subjects=AsyncMock(return_value=[{"id": "subject-arkana"}]),
+            get_subject_sources=AsyncMock(return_value=[{"id": "source-loreto2"}, {"id": "source-san-basilio"}]),
+            delete_subject=AsyncMock(),
+            delete_source=AsyncMock(),
+        )
+
+    @pytest.mark.asyncio
+    async def test_both_sources_stale_subject_deleted_on_later_run(self):
+        """Two feeds lose the same vessel together: both keep the subject, a later run deletes it."""
+        state = _InMemoryState()
+        er_client = self._shared_vessel_client()
+
+        # Run 1: the cleanup still sees the other source, so the subject is kept
+        with patch("app.actions.handlers.AsyncERClient", return_value=er_client):
+            assert await delete_vessel_from_earthranger(
+                "vessel-111", self.ER_URL, "token", remember_kept_subject=self._remember(state)
+            )
+            deleted = await _cleanup_kept_subjects(state, "int-1", self.ER_URL, "token")
+
+        assert deleted == []
+        er_client.delete_subject.assert_not_called()
+        assert self._kept(state) == {self.ER_URL: ["subject-arkana"]}
+
+        # Run 2: both source deletions have completed, so the subject has no sources left
+        er_client.get_subject_sources = AsyncMock(return_value=[])
+        with patch("app.actions.handlers.AsyncERClient", return_value=er_client):
+            deleted = await _cleanup_kept_subjects(state, "int-1", self.ER_URL, "token")
+
+        assert deleted == ["subject-arkana"]
+        er_client.delete_subject.assert_called_once_with("subject-arkana")
+        assert self._kept(state) == {}
+
+    @pytest.mark.asyncio
+    async def test_interrupted_run_still_deletes_subject_on_retry(self):
+        """The subject is saved before its source is deleted, so a run that stops right after
+        the source deletion (timeout, crash) doesn't lose it."""
+        state = _InMemoryState()
+        er_client = self._shared_vessel_client()
+
+        # Run 1 stops right after the source deletion, before the kept-subject recheck
+        with patch("app.actions.handlers.AsyncERClient", return_value=er_client):
+            assert await delete_vessel_from_earthranger(
+                "vessel-111", self.ER_URL, "token", remember_kept_subject=self._remember(state)
+            )
+        assert self._kept(state) == {self.ER_URL: ["subject-arkana"]}
+
+        # Retry: the source is gone, so the track can't lead back to the subject...
+        er_client.get_source_by_manufacturer_id = AsyncMock(side_effect=ERClientNotFound("not found"))
+        er_client.get_subject_sources = AsyncMock(return_value=[])
+        with patch("app.actions.handlers.AsyncERClient", return_value=er_client):
+            assert not await delete_vessel_from_earthranger(
+                "vessel-111", self.ER_URL, "token", remember_kept_subject=self._remember(state)
+            )
+            # ...but the saved subject is still rechecked and deleted
+            deleted = await _cleanup_kept_subjects(state, "int-1", self.ER_URL, "token")
+
+        assert deleted == ["subject-arkana"]
+        er_client.delete_subject.assert_called_once_with("subject-arkana")
+
+    @pytest.mark.asyncio
+    async def test_source_not_deleted_when_subject_cannot_be_saved(self):
+        """If saving the kept subject fails, the source is left alone so the next run can retry."""
+        er_client = self._shared_vessel_client()
+
+        async def failing_remember(subject_id):
+            raise ConnectionError("redis down")
+
+        with patch("app.actions.handlers.AsyncERClient", return_value=er_client):
+            result = await delete_vessel_from_earthranger(
+                "vessel-111", self.ER_URL, "token", remember_kept_subject=failing_remember
+            )
+
+        assert result is False
+        er_client.delete_source.assert_not_called()
+        er_client.delete_subject.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_subject_still_used_stays_pending(self):
+        state = _InMemoryState()
+        await _remember_kept_subject(state, "int-1", self.ER_URL, "subject-arkana")
+        er_client = _mock_er_client(
+            get_subject_sources=AsyncMock(return_value=[{"id": "source-san-basilio"}]),
+            delete_subject=AsyncMock(),
+        )
+        with patch("app.actions.handlers.AsyncERClient", return_value=er_client):
+            deleted = await _cleanup_kept_subjects(state, "int-1", self.ER_URL, "token")
+
+        assert deleted == []
+        er_client.delete_subject.assert_not_called()
+        assert self._kept(state) == {self.ER_URL: ["subject-arkana"]}
+
+    @pytest.mark.asyncio
+    async def test_subject_already_gone_is_forgotten(self):
+        state = _InMemoryState()
+        await _remember_kept_subject(state, "int-1", self.ER_URL, "subject-arkana")
+        er_client = _mock_er_client(
+            get_subject_sources=AsyncMock(side_effect=ERClientNotFound("not found")),
+            delete_subject=AsyncMock(),
+        )
+        with patch("app.actions.handlers.AsyncERClient", return_value=er_client):
+            deleted = await _cleanup_kept_subjects(state, "int-1", self.ER_URL, "token")
+
+        assert deleted == []
+        er_client.delete_subject.assert_not_called()
+        assert self._kept(state) == {}
+
+    @pytest.mark.asyncio
+    async def test_nothing_pending_makes_no_calls(self, mock_state_manager):
+        with patch("app.actions.handlers.AsyncERClient") as er_cls:
+            deleted = await _cleanup_kept_subjects(mock_state_manager, "int-1", self.ER_URL, "token")
+
+        assert deleted == []
+        er_cls.assert_not_called()
+        mock_state_manager.set_state.assert_not_called()

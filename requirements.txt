@@ -43,7 +43,7 @@ click==8.1.8
     #   uvicorn
 cryptography==50.0.0
     # via gcloud-aio-auth
-dateparser==1.5.1
+dateparser==1.2.2
     # via earthranger-client
 earthranger-client==1.15.0
     # via -r requirements.in
@@ -117,7 +117,7 @@ pyjq==2.6.0
     # via -r requirements-base.in
 pyjwt==2.15.1
     # via gcloud-aio-auth
-python-dateutil==3.0.0
+python-dateutil==2.9.0.post0
     # via dateparser
 python-dotenv==1.2.2
     # via environs
@@ -158,8 +158,6 @@ typing-extensions==4.16.0
     #   pyjwt
     #   starlette
     #   uvicorn
-tzdata==2026.6
-    # via python-dateutil
 tzlocal==5.4.5
     # via dateparser
 urllib3==2.8.0

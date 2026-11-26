@@ -143,6 +143,7 @@ def mock_state_manager():
     state_manager.get_state = AsyncMock(return_value={})
     state_manager.set_state = AsyncMock()
     state_manager.delete_state = AsyncMock()
+    state_manager.set_if_absent = AsyncMock(return_value=True)
     return state_manager
 
 

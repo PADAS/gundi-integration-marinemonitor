@@ -1,6 +1,6 @@
 """Tests for the pull action's run lock and its Gundi API retries."""
 import pytest
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from gundi_client_v2.errors import GundiAPIError
 
@@ -22,12 +22,15 @@ class TestPullRunLock:
     ):
         mock_state_manager.set_if_absent = AsyncMock(return_value=False)
 
-        with patch_handler_dependencies(mock_marine_monitor_client, mock_state_manager) as mocks:
+        with patch_handler_dependencies(mock_marine_monitor_client, mock_state_manager) as mocks, patch(
+            "app.actions.handlers.log_action_activity", new_callable=AsyncMock,
+        ) as mock_log:
             result = await action_pull_vessel_tracking(
                 integration=mock_integration, action_config=mock_pull_config,
             )
 
         assert result == {"skipped": "another run is still in progress"}
+        mock_log.assert_awaited_once()
         mock_marine_monitor_client.get_track_markers.assert_not_called()
         mocks["er_client"].post_sensor_observation.assert_not_called()
         # The lock belongs to the run that holds it: a skipped run never releases it.
@@ -83,6 +86,20 @@ class TestPullRunLock:
 
         assert result["observations_extracted"] == 1
         mock_state_manager.set_if_absent.assert_not_called()
+
+
+    @pytest.mark.asyncio
+    async def test_failed_lock_release_keeps_the_run_result(
+        self, mock_integration, mock_pull_config, mock_marine_monitor_client, mock_state_manager,
+    ):
+        mock_state_manager.delete_state = AsyncMock(side_effect=RuntimeError("redis down"))
+
+        with patch_handler_dependencies(mock_marine_monitor_client, mock_state_manager):
+            result = await action_pull_vessel_tracking(
+                integration=mock_integration, action_config=mock_pull_config,
+            )
+
+        assert result["observations_extracted"] == 1
 
 
 class TestGundiRetries:

@@ -348,12 +348,23 @@ async def action_pull_vessel_tracking(
         )
         if not got_lock:
             logger.info(f"Skipping vessel pull for integration '{integration_id}': another run is still in progress")
+            await log_action_activity(
+                integration_id=integration_id,
+                action_id=PULL_ACTION_ID,
+                title="Vessel pull skipped because the previous run hasn't finished yet",
+                level=logging.INFO,
+            )
             return {"skipped": "another run is still in progress"}
     try:
         return await _pull_vessel_tracking(integration_id, action_config, state_manager)
     finally:
         if use_lock:
-            await state_manager.delete_state(integration_id, PULL_ACTION_ID, source_id=PULL_LOCK_STATE_ID)
+            try:
+                await state_manager.delete_state(integration_id, PULL_ACTION_ID, source_id=PULL_LOCK_STATE_ID)
+            except Exception:
+                # The lock's TTL frees it anyway; never let the release hide
+                # the run's own result or error.
+                logger.exception(f"Could not release the vessel pull lock for integration '{integration_id}'")
 
 
 async def _pull_vessel_tracking(
